@@ -62,7 +62,7 @@ require behavior-level verification, not Prompt phrase checks.
   The current source adds compare-and-swap blocker-contract revision with
   exact Supervisor-evidence binding, Mission-file locking, durable bidirectional
   history, conflict rejection, and file-level replay idempotency so later
-  evidence cannot diverge from scheduler state. All 102 regression tests pass
+  evidence cannot diverge from scheduler state. All 107 regression tests pass
   in both source and installed copies after the 2026-08-01 static
   synchronization.
 - Live migration verified: the two legacy BLOCKED records now carry
@@ -77,6 +77,8 @@ require behavior-level verification, not Prompt phrase checks.
   FastFictionFactory action/token/cursor identities remained unchanged. The
   canonical JSON and generated Markdown were rebuilt from that same revision;
   the installed consistency gate accepted all three structured route records.
+  The immutable point-in-time identities are recorded in
+  [live-route-isolation-rev118-to-rev122.md](evidence/live-route-isolation-rev118-to-rev122.md).
 - Intentionally inactive while idle: recovery automation.
 - Still required before claiming live completion: completion of one project
   while another remains deliberately delayed, a status-request canary where an

@@ -312,13 +312,14 @@ timestamp stability.
 
 It also requires deterministic graph rendering, complete BLOCKED contracts,
 duplicate same-Mission route suppression, cursor-complete checkpoints, and a
-status-request canary in which an already-arrived Worker Report is delivered to
-the exact Supervisor before the status answer returns. A stale portfolio
-revision or incomplete active-route set must fail before rendering.
+behavior test proving that an observed Worker Report projects a mandatory exact
+Supervisor handoff and forbids a checkpoint. A stale portfolio revision or
+incomplete active-route set must fail before rendering.
 
 Live acceptance is separate. It requires a two-project canary in which A is
 deliberately delayed, B is dispatched and completes while A remains leased,
 the multi-target wait consumes one result without damaging the other route,
-and an interrupted-route recovery preserves both delivery identities. Green
-deterministic tests do not by themselves prove live delivery or human
-acceptance.
+an interrupted-route recovery preserves both delivery identities, and a normal
+status request sends an already-arrived Worker Report to its exact Supervisor
+before answering. Green deterministic tests do not by themselves prove live
+delivery or human acceptance.

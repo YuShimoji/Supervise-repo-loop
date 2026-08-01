@@ -804,7 +804,7 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
             if stage == current:
                 css_class = (
                     "blocked"
-                    if state in {"SYSTEM_BLOCKED", "WAITING_EXTERNAL"}
+                    if state == "SYSTEM_BLOCKED"
                     else "parked"
                     if state in {"WAITING_USER", "PARKED_BY_POLICY"}
                     else "current"

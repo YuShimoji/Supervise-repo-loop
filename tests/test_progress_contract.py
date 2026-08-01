@@ -527,6 +527,10 @@ class ProgressAndStopContractTests(unittest.TestCase):
                 }
                 rendered = loop.render_portfolio_markdown(portfolio)
                 self.assertIn(state, rendered)
+                expected_class = (
+                    "current" if state == "WAITING_EXTERNAL" else "parked"
+                )
+                self.assertIn(f'["NEXT ROUTE"]:::{expected_class}', rendered)
 
         blocked = copy.deepcopy(portfolio)
         blocked["repositories"][0]["state"] = "SYSTEM_BLOCKED"

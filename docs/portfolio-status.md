@@ -87,7 +87,8 @@ that revision, so the table and scheduler cannot describe different blockers.
 they are not blocker classifications and do not require a fabricated recovery
 contract. Only `SYSTEM_BLOCKED` and `PARKED_BY_POLICY` require `stop`. If a wait
 row also carries a real stop contract, it is validated but remains secondary to
-the exact route identity.
+the exact route identity. The graph renders normal external waits in blue,
+user/review waits and policy parks in amber, and only system blockers in red.
 
 ## User input and proposal lineage
 

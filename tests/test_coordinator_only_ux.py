@@ -1629,7 +1629,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             "the Coordinator prompt must have one unambiguous JSON contract",
         )
         contract = json.loads(encoded_contracts[0])
-        self.assertEqual(contract["contract_version"], 3)
+        self.assertEqual(contract["contract_version"], 4)
 
         self.assertEqual(
             contract["scheduler"],
@@ -1682,6 +1682,14 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             contract["status"]["status_query"],
             "consume_observed_results_and_drain_required_handoffs_before_answer",
+        )
+        self.assertEqual(
+            contract["status"]["checkpoint_consistency"],
+            {
+                "source": "same_scheduler_revision_and_active_route_set",
+                "projection_order": "json_then_render_then_verify",
+                "on_mismatch": "CHECKPOINT_FORBIDDEN",
+            },
         )
         self.assertEqual(
             set(contract["input_lineage"]["states"]),

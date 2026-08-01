@@ -8,7 +8,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
 
 ```json
 {
-  "contract_version": 3,
+  "contract_version": 4,
   "scheduler": {
     "claim_model": "scheduler_claim_plus_route_leases",
     "configured_external_route_capacity": 3,
@@ -47,6 +47,11 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "renderer": "portfolio-render",
     "graph": "mermaid_inline_and_markdown_index",
     "status_query": "consume_observed_results_and_drain_required_handoffs_before_answer",
+    "checkpoint_consistency": {
+      "source": "same_scheduler_revision_and_active_route_set",
+      "projection_order": "json_then_render_then_verify",
+      "on_mismatch": "CHECKPOINT_FORBIDDEN"
+    },
     "required_stop_fields": [
       "introduced_by",
       "requirement",
@@ -213,13 +218,24 @@ Waiting and turn budget
   event. Ownerless READY is invalid.
 
 Durable portfolio index
-- Derive and atomically update the canonical JSON and human-readable Markdown
-  status files named in the JSON contract. Update them only when the semantic
-  fingerprint changes; do not use timestamps alone as change.
+- Derive the canonical JSON and human-readable Markdown status files named in
+  the JSON contract from one plan revision. Update them only when the semantic
+  fingerprint changes; do not use timestamps alone as change. Route-set,
+  route-state, input-disposition, and next-owner changes are semantic changes
+  even when project artifacts are unchanged.
 - Write JSON schema version 2 first, then generate Markdown with the
   deterministic `portfolio-render` command. Do not hand-maintain a divergent
   table. Both files contain the same seven-stage path: Mission, Work Order,
   Worker, Worker Report, Supervisor, Verdict, Next Route.
+- Before any state-changing response or explicit status answer can checkpoint,
+  verify against the scheduler file read for that response: exact
+  `scheduler_revision`, `concurrency_limit`, active-route count, and the full
+  active route set (`repository_id`, `action_id`, recipient, delivery token,
+  cursor, and status). Persist that route set in `active_routes`. A missing,
+  stale, duplicate, or extra identity is `portfolio_scheduler_mismatch` and
+  forbids the checkpoint; regenerate JSON, render Markdown, and verify again.
+  JSON and Markdown are each atomically replaced, but no cross-file atomic
+  transaction is claimed.
 - Include every registered repository, even when it has no Mission. For each
   row show: project state, current Mission and attempt, why it is or is not
   running, route owner, last semantic evidence, exact next move, unblock or
@@ -301,7 +317,9 @@ At minimum prove:
 10. the deterministic renderer produces the same seven-stage graph and stop
     cards from the canonical JSON without hand-edited status prose;
 11. a live two-project canary demonstrates B finishing while A is deliberately
-    delayed.
+    delayed;
+12. a stale portfolio revision or incomplete active-route set is rejected before
+    rendering or a user checkpoint.
 
 The transition map and portfolio index are projections, not additional
 schedulers. Their state and resume anchors must come from the same deterministic

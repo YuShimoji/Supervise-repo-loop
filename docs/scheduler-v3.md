@@ -47,6 +47,12 @@ response and durable index. It is not a second scheduling function. Identical
 semantic state and action/terminal identity must not repeat a map. Unchanged
 recovery wakes remain silent.
 
+The map also carries the scheduler revision and exact structured active route
+set. Any difference in revision, capacity, count, repository, action,
+recipient, token, cursor, or route status makes the checkpoint invalid. Route
+admission and release are semantic changes even if repository artifacts do not
+change.
+
 ## Incident evidence
 
 The pre-v3 Coordinator session telemetry contained 386 heartbeat turns. Summing
@@ -307,7 +313,8 @@ timestamp stability.
 It also requires deterministic graph rendering, complete BLOCKED contracts,
 duplicate same-Mission route suppression, cursor-complete checkpoints, and a
 status-request canary in which an already-arrived Worker Report is delivered to
-the exact Supervisor before the status answer returns.
+the exact Supervisor before the status answer returns. A stale portfolio
+revision or incomplete active-route set must fail before rendering.
 
 Live acceptance is separate. It requires a two-project canary in which A is
 deliberately delayed, B is dispatched and completes while A remains leased,

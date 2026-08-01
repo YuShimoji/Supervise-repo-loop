@@ -8,7 +8,9 @@
     "semantic_fingerprint",
     "coordinator_availability",
     "execution_state",
+    "scheduler_revision",
     "active_route_count",
+    "active_routes",
     "concurrency_limit",
     "repositories"
   ],
@@ -22,7 +24,12 @@
     "execution_state": {
       "enum": ["READY", "DRAINING", "WAITING_USER", "WAITING_EXTERNAL", "IDLE", "SAFETY_CEILING"]
     },
+    "scheduler_revision": {"type": "integer", "minimum": 0},
     "active_route_count": {"type": "integer", "minimum": 0},
+    "active_routes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/activeRoute"}
+    },
     "concurrency_limit": {"type": "integer", "minimum": 1, "maximum": 8},
     "repositories": {
       "type": "array",
@@ -31,6 +38,31 @@
   },
   "additionalProperties": true,
   "$defs": {
+    "activeRoute": {
+      "type": "object",
+      "required": [
+        "repository_id",
+        "action_id",
+        "recipient_thread_id",
+        "delivery_token",
+        "after_cursor",
+        "status"
+      ],
+      "properties": {
+        "repository_id": {"type": "string", "minLength": 1},
+        "action_id": {"type": "string", "minLength": 1},
+        "recipient_thread_id": {"type": "string", "minLength": 1},
+        "delivery_token": {"type": "string", "minLength": 1},
+        "after_cursor": {
+          "anyOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        },
+        "status": {"enum": ["prepared", "sent", "waiting"]}
+      },
+      "additionalProperties": true
+    },
     "stage": {
       "enum": [
         "MISSION",

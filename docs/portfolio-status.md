@@ -12,16 +12,28 @@ The filename remains stable so live links do not break. The JSON object's
 `portfolio-render`; it is never an independently edited status source.
 
 They are runtime artifacts and are never committed to the source repository.
-They update atomically only when their semantic fingerprint changes. Timestamps,
-file mtimes, active flags, wait counts, and unchanged observations are excluded
-from that fingerprint.
+The JSON source projection updates only when its semantic fingerprint changes.
+Markdown is then regenerated from the validated JSON and replaced atomically as
+its own file. A status checkpoint is publishable only after the renderer confirms
+that both projections describe the same semantic fingerprint and that the JSON
+records the exact current scheduler revision and active route set. The two files
+are not claimed to change in one cross-file atomic transaction. Timestamps, file
+mtimes, active flags, wait counts, and unchanged observations are excluded from
+that fingerprint.
 
 ```text
 python scripts/supervise_repo_loop.py portfolio-render
 ```
 
-The command validates the v2 stop/progress fields and atomically rewrites only
-the Markdown projection.
+The command reads the live scheduler state by default. It validates the v2
+stop/progress fields, scheduler revision, concurrency, active-route count, and
+the exact structured route identities before atomically rewriting only the
+Markdown projection. A stale JSON source fails before output is changed.
+
+The top-level `active_routes` array contains the repository, action, exact
+recipient, delivery token, cursor, and status for every prepared or external
+route. Its order is presentational; its identity set must exactly equal the
+scheduler's capacity-reserving route set.
 
 ## Repository rows
 

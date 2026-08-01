@@ -714,6 +714,41 @@ def _mermaid_label(value: Any) -> str:
     )
 
 
+PORTFOLIO_ACTIVE_ROUTE_FIELDS = (
+    "repository_id",
+    "action_id",
+    "recipient_thread_id",
+    "delivery_token",
+    "after_cursor",
+    "status",
+)
+
+
+def _normalize_portfolio_active_route(
+    route: Any, *, label: str
+) -> dict[str, Any]:
+    if not isinstance(route, dict):
+        raise ProtocolError(f"{label} must be an object")
+    normalized = {field: route.get(field) for field in PORTFOLIO_ACTIVE_ROUTE_FIELDS}
+    for field in (
+        "repository_id",
+        "action_id",
+        "recipient_thread_id",
+        "delivery_token",
+        "status",
+    ):
+        if not isinstance(normalized[field], str) or not normalized[field]:
+            raise ProtocolError(f"{label} requires {field}")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", normalized["delivery_token"]):
+        raise ProtocolError(f"{label} delivery_token must be SHA-256")
+    if normalized["status"] not in {"prepared", "sent", "waiting"}:
+        raise ProtocolError(f"{label} status is not an active route status")
+    after_cursor = normalized["after_cursor"]
+    if after_cursor is not None and not isinstance(after_cursor, str):
+        raise ProtocolError(f"{label} after_cursor must be a string or null")
+    return normalized
+
+
 def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
     if portfolio.get("schema_version") != 2:
         raise ProtocolError("portfolio status schema_version must be 2")
@@ -732,6 +767,39 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
         "SAFETY_CEILING",
     }:
         raise ProtocolError("portfolio execution_state is invalid")
+    active_route_count = portfolio.get("active_route_count")
+    if not isinstance(active_route_count, int) or active_route_count < 0:
+        raise ProtocolError(
+            "portfolio active_route_count must be a non-negative integer"
+        )
+    concurrency_limit = portfolio.get("concurrency_limit")
+    if not isinstance(concurrency_limit, int) or not (
+        1 <= concurrency_limit <= MAX_COORDINATOR_WAIT_TARGETS
+    ):
+        raise ProtocolError("portfolio concurrency_limit must be between 1 and 8")
+    if active_route_count > concurrency_limit:
+        raise ProtocolError(
+            "portfolio active_route_count cannot exceed concurrency_limit"
+        )
+    active_routes = portfolio.get("active_routes")
+    if active_routes is not None:
+        if not isinstance(active_routes, list):
+            raise ProtocolError("portfolio active_routes must be an array")
+        if len(active_routes) != active_route_count:
+            raise ProtocolError(
+                "portfolio active_route_count does not match its active_routes array"
+            )
+        seen_route_ids: set[str] = set()
+        for index, route in enumerate(active_routes):
+            normalized = _normalize_portfolio_active_route(
+                route, label=f"portfolio active_routes[{index}]"
+            )
+            action_id = normalized["action_id"]
+            if action_id in seen_route_ids:
+                raise ProtocolError(
+                    f"duplicate portfolio active route action_id: {action_id}"
+                )
+            seen_route_ids.add(action_id)
     repositories = portfolio.get("repositories")
     if not isinstance(repositories, list):
         raise ProtocolError("portfolio repositories must be an array")
@@ -769,6 +837,167 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
             validate_blocked_contract(stop)
 
 
+def _active_scheduler_delivery_routes(
+    scheduler_state: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return validated routes that reserve an exact external delivery slot.
+
+    Sent/waiting route leases are already externally in flight.  A prepared
+    scheduler claim has not yet become in-flight work, but it is durable,
+    recipient-bound, recovery-eligible, and reserves the same concurrency
+    capacity.  Both therefore have to be represented by a portfolio snapshot
+    that claims to describe the scheduler revision.
+    """
+    scheduler = migrate_scheduler_state(scheduler_state)
+    routes: list[dict[str, Any]] = []
+    scheduler_claim = scheduler.get("scheduler_claim")
+    if (
+        isinstance(scheduler_claim, dict)
+        and scheduler_claim.get("status") == "prepared"
+    ):
+        routes.append(_record_with_route_metadata(scheduler_claim))
+    routes.extend(
+        _record_with_route_metadata(item)
+        for item in scheduler.get("route_leases", [])
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in {"prepared", "sent", "waiting"}
+    )
+    return scheduler, routes
+
+
+def _scheduler_route_portfolio_projection(route: dict[str, Any]) -> dict[str, Any]:
+    action_id = str(route.get("action_id") or "")
+    projected = {
+        "repository_id": str(
+            route.get("repository_id")
+            or _action_repository_id(route.get("action", {}))
+            or ""
+        ),
+        "action_id": action_id,
+        "recipient_thread_id": str(route.get("recipient_thread_id") or ""),
+        "delivery_token": str(route.get("delivery_token") or ""),
+        "after_cursor": route.get("after_cursor"),
+        "status": str(route.get("status") or ""),
+    }
+    return _normalize_portfolio_active_route(
+        projected, label=f"active scheduler route {action_id or '<missing>'}"
+    )
+
+
+def validate_portfolio_scheduler_consistency(
+    portfolio: dict[str, Any], scheduler_state: dict[str, Any]
+) -> None:
+    """Fail closed when a portfolio projection is stale or loses route identity."""
+    validate_portfolio_status(portfolio)
+    scheduler, active_routes = _active_scheduler_delivery_routes(scheduler_state)
+
+    portfolio_revision = portfolio.get("scheduler_revision")
+    scheduler_revision = scheduler.get("revision")
+    if not isinstance(portfolio_revision, int):
+        raise ProtocolError("portfolio scheduler_revision must be an integer")
+    if portfolio_revision != scheduler_revision:
+        raise ProtocolError(
+            "portfolio scheduler_revision "
+            f"{portfolio_revision} does not match scheduler revision "
+            f"{scheduler_revision}"
+        )
+
+    portfolio_route_count = portfolio.get("active_route_count")
+    if portfolio_route_count != len(active_routes):
+        raise ProtocolError(
+            "portfolio active_route_count "
+            f"{portfolio_route_count} does not match "
+            f"{len(active_routes)} active scheduler routes"
+        )
+
+    portfolio_limit = portfolio.get("concurrency_limit")
+    scheduler_limit = scheduler.get("concurrency_limit")
+    if portfolio_limit != scheduler_limit:
+        raise ProtocolError(
+            "portfolio concurrency_limit "
+            f"{portfolio_limit} does not match scheduler concurrency_limit "
+            f"{scheduler_limit}"
+        )
+
+    portfolio_routes = portfolio.get("active_routes")
+    if not isinstance(portfolio_routes, list):
+        raise ProtocolError(
+            "portfolio active_routes is required for scheduler consistency validation"
+        )
+    expected_by_action = {
+        item["action_id"]: item
+        for item in (
+            _scheduler_route_portfolio_projection(route)
+            for route in active_routes
+        )
+    }
+    actual_by_action = {
+        item["action_id"]: item
+        for item in (
+            _normalize_portfolio_active_route(
+                route, label=f"portfolio active_routes[{index}]"
+            )
+            for index, route in enumerate(portfolio_routes)
+        )
+    }
+    if actual_by_action != expected_by_action:
+        missing = sorted(set(expected_by_action) - set(actual_by_action))
+        unexpected = sorted(set(actual_by_action) - set(expected_by_action))
+        mismatched = sorted(
+            action_id
+            for action_id in set(actual_by_action) & set(expected_by_action)
+            if actual_by_action[action_id] != expected_by_action[action_id]
+        )
+        details = []
+        if missing:
+            details.append("missing=" + ",".join(missing))
+        if unexpected:
+            details.append("unexpected=" + ",".join(unexpected))
+        if mismatched:
+            details.append("mismatched=" + ",".join(mismatched))
+        raise ProtocolError(
+            "portfolio active_routes does not exactly match scheduler routes: "
+            + "; ".join(details)
+        )
+
+    rows_by_repository = {
+        str(row.get("repository_id") or ""): row
+        for row in portfolio["repositories"]
+        if isinstance(row, dict)
+    }
+    for route in active_routes:
+        action_id = str(route.get("action_id") or "")
+        recipient_thread_id = str(route.get("recipient_thread_id") or "")
+        repository_id = str(
+            route.get("repository_id")
+            or _action_repository_id(route.get("action", {}))
+            or ""
+        )
+        row = rows_by_repository.get(repository_id)
+        if row is None:
+            raise ProtocolError(
+                f"active scheduler route {action_id} has no matching portfolio "
+                f"repository row for {repository_id or '<missing repository_id>'}"
+            )
+        route_owner = str(row.get("route_owner") or "")
+        missing_identity = [
+            label
+            for label, value in (
+                ("action_id", action_id),
+                ("recipient_thread_id", recipient_thread_id),
+            )
+            if not value or value not in route_owner
+        ]
+        if missing_identity:
+            raise ProtocolError(
+                f"portfolio route_owner for {repository_id} does not include "
+                "exact active route identity: "
+                + ", ".join(missing_identity)
+                + f" (action_id={action_id or '<missing>'}, "
+                f"recipient_thread_id={recipient_thread_id or '<missing>'})"
+            )
+
+
 def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
     validate_portfolio_status(portfolio)
     repositories = portfolio["repositories"]
@@ -778,15 +1007,52 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
         f"- Coordinator: `{_markdown_cell(portfolio.get('coordinator_availability', 'AVAILABLE'))}`",
         f"- Execution: `{_markdown_cell(portfolio.get('execution_state', 'IDLE'))}`",
         f"- Active routes: `{_markdown_cell(portfolio.get('active_route_count', 0))} / {_markdown_cell(portfolio.get('concurrency_limit', 3))}`",
-        "",
-        "```mermaid",
-        "flowchart LR",
-        "  classDef done fill:#d8efe1,stroke:#2f855a,color:#173d2b;",
-        "  classDef current fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:3px;",
-        "  classDef blocked fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:3px;",
-        "  classDef parked fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:3px;",
-        "  classDef pending fill:#f3f4f6,stroke:#9ca3af,color:#374151;",
     ]
+    active_routes = portfolio.get("active_routes")
+    if isinstance(active_routes, list) and active_routes:
+        lines.extend(
+            [
+                "",
+                "## Active external routes",
+                "",
+                "| Project | Status | Action | Exact recipient | Wait cursor |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        project_names = {
+            str(row.get("repository_id") or ""): str(
+                row.get("project_name") or row.get("repository_id") or ""
+            )
+            for row in repositories
+        }
+        for route in active_routes:
+            repository_id = str(route.get("repository_id") or "")
+            lines.append(
+                "| "
+                + " | ".join(
+                    _markdown_cell(value)
+                    for value in (
+                        project_names.get(repository_id, repository_id),
+                        route.get("status"),
+                        route.get("action_id"),
+                        route.get("recipient_thread_id"),
+                        route.get("after_cursor") or "not recorded",
+                    )
+                )
+                + " |"
+            )
+    lines.extend(
+        [
+            "",
+            "```mermaid",
+            "flowchart LR",
+            "  classDef done fill:#d8efe1,stroke:#2f855a,color:#173d2b;",
+            "  classDef current fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:3px;",
+            "  classDef blocked fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-width:3px;",
+            "  classDef parked fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:3px;",
+            "  classDef pending fill:#f3f4f6,stroke:#9ca3af,color:#374151;",
+        ]
+    )
     for index, row in enumerate(repositories):
         progress = row["progress"]
         completed = set(progress.get("completed_stages", []))
@@ -6107,6 +6373,9 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio_render.add_argument(
         "--output", type=Path, default=DEFAULT_PORTFOLIO_MARKDOWN
     )
+    portfolio_render.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
     portfolio_render.add_argument("--dry-run", action="store_true")
 
     coordinator_plan = sub.add_parser("coordinator-plan")
@@ -6578,6 +6847,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "portfolio-render":
             portfolio = load_json(args.input)
+            scheduler_state = load_scheduler_state(args.scheduler_state)
+            validate_portfolio_scheduler_consistency(portfolio, scheduler_state)
             rendered = render_portfolio_markdown(portfolio)
             if not args.dry_run:
                 atomic_write_text(args.output, rendered)
@@ -6590,6 +6861,8 @@ def main(argv: list[str] | None = None) -> int:
                     "semantic_fingerprint": portfolio.get(
                         "semantic_fingerprint"
                     ),
+                    "scheduler_revision": scheduler_state.get("revision"),
+                    "active_route_count": portfolio.get("active_route_count"),
                     "dry_run": bool(args.dry_run),
                 }
             )

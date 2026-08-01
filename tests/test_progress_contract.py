@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -59,6 +61,135 @@ def supervisor_revision_contract(
         "evidence_sha256": loop.sha256_file(evidence_path),
     }
     return revision, evidence_path
+
+
+def active_route_record(
+    repository_id: str,
+    action_id: str,
+    recipient_thread_id: str,
+    *,
+    status: str,
+    after_cursor: str | None,
+    route_class: str = "execution",
+) -> dict:
+    action = {
+        "action_id": action_id,
+        "kind": (
+            "route_project_question"
+            if route_class == "control"
+            else "request_next_mission"
+        ),
+        "requires_external_result": True,
+        "payload": {
+            "repository_id": repository_id,
+            "route": {
+                "repository_id": repository_id,
+                "recipient_thread_id": recipient_thread_id,
+            },
+        },
+    }
+    packet_sha256 = loop.sha256_text("packet:" + action_id)
+    delivery_token = loop.canonical_json_hash(
+        {
+            "action_id": action_id,
+            "recipient_thread_id": recipient_thread_id,
+            "packet_sha256": packet_sha256,
+        }
+    )
+    return {
+        "action_id": action_id,
+        "action": action,
+        "status": status,
+        "repository_id": repository_id,
+        "route_class": route_class,
+        "recipient_thread_id": recipient_thread_id,
+        "packet_sha256": packet_sha256,
+        "delivery_token": delivery_token,
+        "after_cursor": after_cursor,
+    }
+
+
+def scheduler_and_portfolio_with_active_routes() -> tuple[dict, dict]:
+    waiting = active_route_record(
+        REPO_A,
+        "a" * 32,
+        "supervisor-a",
+        status="waiting",
+        after_cursor="cursor-a",
+    )
+    prepared = active_route_record(
+        REPO_B,
+        "b" * 32,
+        "supervisor-b",
+        status="prepared",
+        after_cursor=None,
+        route_class="control",
+    )
+    scheduler = loop.default_scheduler_state()
+    scheduler.update(
+        {
+            "revision": 12,
+            "scheduler_claim": prepared,
+            "route_leases": [waiting],
+        }
+    )
+    active_routes = [
+        {
+            field: route.get(field)
+            for field in loop.PORTFOLIO_ACTIVE_ROUTE_FIELDS
+        }
+        for route in (prepared, waiting)
+    ]
+    portfolio = {
+        "schema_version": 2,
+        "semantic_fingerprint": "f" * 64,
+        "coordinator_availability": "AVAILABLE",
+        "execution_state": "DRAINING",
+        "scheduler_revision": 12,
+        "active_route_count": 2,
+        "concurrency_limit": 3,
+        "active_routes": active_routes,
+        "repositories": [
+            {
+                "repository_id": REPO_A,
+                "project_name": "Project A",
+                "state": "WAITING_EXTERNAL",
+                "progress": {
+                    "current_stage": "SUPERVISOR",
+                    "completed_stages": [
+                        "MISSION",
+                        "WORK_ORDER",
+                        "WORKER",
+                        "WORKER_REPORT",
+                    ],
+                },
+                "why": "The exact Supervisor route is waiting.",
+                "owner": "exact Supervisor",
+                "route_owner": (
+                    f"Coordinator route lease {waiting['action_id']} -> exact "
+                    f"Supervisor {waiting['recipient_thread_id']}"
+                ),
+                "next_move": "Consume the exact result.",
+            },
+            {
+                "repository_id": REPO_B,
+                "project_name": "Project B",
+                "state": "WAITING_EXTERNAL",
+                "progress": {
+                    "current_stage": "NEXT_ROUTE",
+                    "completed_stages": list(loop.PORTFOLIO_STAGE_ORDER[:-1]),
+                },
+                "why": "The exact delivery is durably prepared.",
+                "owner": "exact Supervisor",
+                "route_owner": (
+                    f"Prepared route {prepared['action_id']} -> exact Supervisor "
+                    f"{prepared['recipient_thread_id']}"
+                ),
+                "next_move": "Reconcile the prepared delivery token.",
+            },
+        ],
+    }
+    return scheduler, portfolio
 
 
 class ProgressAndStopContractTests(unittest.TestCase):
@@ -536,6 +667,95 @@ class ProgressAndStopContractTests(unittest.TestCase):
         blocked["repositories"][0]["state"] = "SYSTEM_BLOCKED"
         with self.assertRaisesRegex(loop.ProtocolError, "non-empty recovery contract"):
             loop.render_portfolio_markdown(blocked)
+
+    def test_T102_portfolio_scheduler_gate_accepts_exact_active_routes(self) -> None:
+        scheduler, portfolio = scheduler_and_portfolio_with_active_routes()
+        loop.validate_portfolio_scheduler_consistency(portfolio, scheduler)
+
+        rendered = loop.render_portfolio_markdown(portfolio)
+        self.assertIn("## Active external routes", rendered)
+        self.assertIn("supervisor-a", rendered)
+        self.assertIn("supervisor-b", rendered)
+
+    def test_T103_portfolio_scheduler_gate_rejects_stale_revision_and_count(
+        self,
+    ) -> None:
+        scheduler, portfolio = scheduler_and_portfolio_with_active_routes()
+
+        stale = copy.deepcopy(portfolio)
+        stale["scheduler_revision"] = 11
+        with self.assertRaisesRegex(
+            loop.ProtocolError,
+            r"scheduler_revision 11 does not match scheduler revision 12",
+        ):
+            loop.validate_portfolio_scheduler_consistency(stale, scheduler)
+
+        missing_route = copy.deepcopy(portfolio)
+        missing_route["active_route_count"] = 1
+        missing_route["active_routes"] = missing_route["active_routes"][:1]
+        with self.assertRaisesRegex(
+            loop.ProtocolError,
+            r"active_route_count 1 does not match 2 active scheduler routes",
+        ):
+            loop.validate_portfolio_scheduler_consistency(missing_route, scheduler)
+
+    def test_T104_portfolio_scheduler_gate_rejects_route_set_divergence(self) -> None:
+        scheduler, portfolio = scheduler_and_portfolio_with_active_routes()
+        divergent = copy.deepcopy(portfolio)
+        divergent["active_routes"][0]["recipient_thread_id"] = "wrong-supervisor"
+        with self.assertRaisesRegex(
+            loop.ProtocolError,
+            r"active_routes does not exactly match scheduler routes: .*mismatched",
+        ):
+            loop.validate_portfolio_scheduler_consistency(divergent, scheduler)
+
+    def test_T105_portfolio_scheduler_gate_requires_human_route_identity(self) -> None:
+        scheduler, portfolio = scheduler_and_portfolio_with_active_routes()
+        portfolio["repositories"][1]["route_owner"] = (
+            "Prepared route " + portfolio["active_routes"][0]["action_id"]
+        )
+        with self.assertRaisesRegex(
+            loop.ProtocolError,
+            r"route_owner.*does not include exact active route identity: "
+            r"recipient_thread_id",
+        ):
+            loop.validate_portfolio_scheduler_consistency(portfolio, scheduler)
+
+    def test_T106_portfolio_render_cli_fails_before_writing_stale_snapshot(
+        self,
+    ) -> None:
+        scheduler, portfolio = scheduler_and_portfolio_with_active_routes()
+        portfolio["scheduler_revision"] = 11
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            portfolio_path = directory / "portfolio.json"
+            scheduler_path = directory / "scheduler.json"
+            output_path = directory / "portfolio.md"
+            portfolio_path.write_text(
+                json.dumps(portfolio, ensure_ascii=False), encoding="utf-8"
+            )
+            scheduler_path.write_text(
+                json.dumps(scheduler, ensure_ascii=False), encoding="utf-8"
+            )
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                result = loop.main(
+                    [
+                        "portfolio-render",
+                        "--input",
+                        str(portfolio_path),
+                        "--output",
+                        str(output_path),
+                        "--scheduler-state",
+                        str(scheduler_path),
+                    ]
+                )
+            self.assertEqual(result, 2)
+            self.assertIn(
+                "scheduler_revision 11 does not match scheduler revision 12",
+                errors.getvalue(),
+            )
+            self.assertFalse(output_path.exists())
 
 
 if __name__ == "__main__":

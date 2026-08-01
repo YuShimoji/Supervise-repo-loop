@@ -71,9 +71,17 @@ require behavior-level verification, not Prompt phrase checks.
   either blocker, or rearming recovery. The later NLMYTGen blocker revision is
   additionally bound to its exact Supervisor event and evidence hash; replay is
   confirmed as a no-op.
+- Live route-isolation evidence: three exact routes coexisted at scheduler
+  revision 118. The Residual Atlas Supervisor successor result was consumed and
+  replaced by a new exact Worker route at revision 122 while the NLMYTGen and
+  FastFictionFactory action/token/cursor identities remained unchanged. The
+  canonical JSON and generated Markdown were rebuilt from that same revision;
+  the installed consistency gate accepted all three structured route records.
 - Intentionally inactive while idle: recovery automation.
-- Still required before claiming live completion: one two-project live drain
-  canary, behavior proof for the durable portfolio/input projections, and one
-  interrupted multi-route recovery canary.
+- Still required before claiming live completion: completion of one project
+  while another remains deliberately delayed, a status-request canary where an
+  already-arrived Worker Report is sent to its Supervisor before answering, and
+  one interrupted multi-route recovery canary. The route-admission,
+  replacement, and durable portfolio/input-projection portions are now proven.
 - Optional later hardening: an external distributed transaction journal if
   writers on multiple hosts or non-lock-preserving storage are ever authorized.

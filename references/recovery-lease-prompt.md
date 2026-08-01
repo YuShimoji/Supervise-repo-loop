@@ -34,7 +34,11 @@ with a durable prepared delivery or repository route lease.
    the resulting mandatory protocol handoff to its next external wait or
    terminal, fill safe capacity from other repositories, start at most one new
    unit of work per repository in the pass, then do one multi-target wait.
-8. Pause this automation as soon as no prepared delivery or active route lease
+8. Before any state-changing checkpoint, rebuild canonical portfolio JSON from
+   the same scheduler revision, including the exact structured active route
+   set, then run `portfolio-render`. Revision, capacity, route count, action,
+   recipient, token, cursor, or status mismatch forbids the checkpoint.
+9. Pause this automation as soon as no prepared delivery or active route lease
    remains. Never leave an idle periodic model wake active.
 
 This lease never owns an independent status calculation. The primary Prompt

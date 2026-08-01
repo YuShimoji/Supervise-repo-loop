@@ -58,6 +58,10 @@ portfolio index named by [coordinator-task-prompt.md](references/coordinator-tas
 Update it only for a semantic transition, generate its Markdown with
 `portfolio-render`, and embed the same compact seven-stage Mermaid graph in
 every state-changing or explicit status response before linking the index. A
+route-set change is semantic. Before checkpointing, require the portfolio's
+scheduler revision, concurrency, active-route count, and exact structured route
+set to match the scheduler state used for the response; a stale projection is a
+checkpoint blocker, not a presentable status. A
 status request consumes already-arrived route results unless the user explicitly
 requests a non-continuing read-only snapshot. `READY` with free capacity must be claimed. If a real turn or safety
 ceiling leaves it unclaimed, persist its owner, action ID, deadline, and wake

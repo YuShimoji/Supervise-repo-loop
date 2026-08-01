@@ -197,5 +197,8 @@ remain waiting while B is claimed and completes, each route preserves a unique
 token/cursor, unchanged BLOCKED evidence is quiet, and timestamp-only changes
 do not create a wake. A normal status request consumes an already-arrived exact
 result and sends its mandatory next hop before presenting the generated
-seven-stage graph. Every waiting row carries an evidence-bound stop contract.
-Live task delivery remains a separate two-project canary.
+seven-stage graph. Every true system blocker or policy park carries an
+evidence-bound stop contract; an ordinary external wait instead carries its
+exact route identity. The portfolio revision and complete route set must match
+the scheduler before checkpoint. Live task delivery remains a separate
+two-project canary.

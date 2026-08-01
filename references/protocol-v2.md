@@ -153,6 +153,10 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
 
 - Canonical status JSON uses schema version 2 and is rendered, not separately
   rewritten, into the Markdown index.
+- It records the exact scheduler revision and structured active route set used
+  to build the response. Revision, concurrency, route count, repository,
+  action, recipient, token, cursor, or route-status mismatch forbids a
+  checkpoint until JSON is regenerated and Markdown is rendered and verified.
 - Every state-changing or explicit status response embeds the same compact
   Mermaid path: Mission -> Work Order -> Worker -> Worker Report -> Supervisor
   -> Verdict -> Next Route.

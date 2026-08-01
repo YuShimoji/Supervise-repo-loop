@@ -134,6 +134,16 @@ Mission packets contain only deltas.
   delivery by reading that recipient for the token before an identical resend.
   Transport is at-least-once with idempotent processing; do not claim
   transactional exactly-once delivery.
+- Every `requires_external_result` action uses the lifecycle `created ->
+  dispatched -> delivery_acknowledged -> result_received -> result_parsed ->
+  result_validated -> result_applied`; `failed`, `stale_result_quarantined`,
+  and `cancelled` are terminal alternatives. Transport ACK never means semantic
+  completion.
+- Apply a semantic result only with the frontier write-ahead reducer. It binds
+  exact route/result identity, current independent authority observation,
+  `based_on_frontier_epoch`, append-only Mission replacement, action closure,
+  and portfolio v3. A stale epoch or lower-authority replay is auditable but
+  cannot create work or user-facing current state.
 - Poll each exact ChatGPT Supervisor route once, then wait once for at most 60
   seconds on the Codex Worker route set and consume the first semantic result.
   A ChatGPT chat ID is never a `wait_threads` target. An unchanged timeout is
@@ -205,10 +215,11 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
 
 ## Progress presentation
 
-- Canonical status JSON uses schema version 2 and is rendered, not separately
+- Canonical status JSON uses schema version 3 and is rendered, not separately
   rewritten, into the Markdown index.
-- It records the exact scheduler revision and structured active route set used
-  to build the response. Revision, concurrency, route count, repository,
+- It records the exact scheduler and frontier revisions, safety mode,
+  FrontierCertificates, and structured active route set used to build the
+  response. Revision, concurrency, route count, repository,
   action, recipient, observer kind, token, cursor, or route-status mismatch forbids a
   checkpoint until JSON is regenerated and Markdown is rendered and verified.
 - Every state-changing or explicit status response embeds the same compact

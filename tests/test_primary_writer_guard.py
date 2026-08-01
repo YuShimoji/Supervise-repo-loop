@@ -18,7 +18,10 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 import supervise_repo_loop as loop  # noqa: E402
 from test_coordinator_only_ux import (  # noqa: E402
     REPO_A,
+    bind_mission_to_frontier,
+    certified_frontier_fixture,
     fixture,
+    materialize_git_fixture_roots,
     mission,
 )
 
@@ -60,6 +63,9 @@ def quick_win_value_contract() -> dict:
 class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
     def _files(self, root: Path) -> tuple[dict[str, Path], list[str], dict]:
         registry, hosts, adapter, coordinator = fixture()
+        materialize_git_fixture_roots(
+            root / "repositories", registry, hosts, adapter
+        )
         coordinator = copy.deepcopy(coordinator)
         coordinator["coordinator_task"] = {
             "scope": "all_repositories",
@@ -72,6 +78,7 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
             "adapter": root / "adapter.json",
             "coordinator": root / "coordinator.json",
             "scheduler": root / "scheduler.json",
+            "frontier": root / "frontier.json",
             "missions": root / "missions",
         }
         paths["missions"].mkdir()
@@ -84,9 +91,17 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
         }
         for name, document in documents.items():
             loop.atomic_write_json(paths[name], document)
+        signals = loop.collect_authority_signals(registry, hosts, adapter)
+        signal_by_repository = {item["repository_id"]: item for item in signals}
+        loop.atomic_write_json(
+            paths["frontier"], certified_frontier_fixture(registry, signals)
+        )
         loop.atomic_write_json(
             paths["missions"] / "ready.json",
-            mission(REPO_A, "WORK_ORDER_RECEIVED", mission_id="writer-guard"),
+            bind_mission_to_frontier(
+                mission(REPO_A, "WORK_ORDER_RECEIVED", mission_id="writer-guard"),
+                signal_by_repository[REPO_A],
+            ),
         )
         common = [
             "--registry",
@@ -101,6 +116,8 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
             str(paths["scheduler"]),
             "--missions-dir",
             str(paths["missions"]),
+            "--frontier-state",
+            str(paths["frontier"]),
         ]
         return paths, common, coordinator
 

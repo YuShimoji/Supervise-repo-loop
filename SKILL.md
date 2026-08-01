@@ -15,7 +15,10 @@ recovering any Coordinator action. Read
 [coordinator-task-prompt.md](references/coordinator-task-prompt.md) when
 starting, resuming, or changing the one user-facing Coordinator task. Read
 [portfolio-status.md](docs/portfolio-status.md) before writing or presenting
-the durable all-project status or user-input lineage. Use
+the durable all-project status or user-input lineage. Read
+[frontier-reconciliation.md](docs/frontier-reconciliation.md) before selecting
+ordinary work, applying an external result, presenting review, or promoting a
+portfolio row. Use
 [recovery-lease-prompt.md](references/recovery-lease-prompt.md) as the exact
 attached heartbeat contract. Read
 [authorized-runtime-recovery.md](docs/authorized-runtime-recovery.md) before
@@ -33,7 +36,8 @@ Exactly one active Coordinator task may write live orchestration state. Its
 identity is `coordinator_state.coordinator_task.task_id`; every mutating CLI
 invocation must run in that same task, require the process `CODEX_THREAD_ID` to
 match it, and use the canonical paths under the installed skill's `state/` for
-the Coordinator record, scheduler, Missions/events, and portfolio projections.
+the Coordinator record, scheduler, frontier ledger/journal, Missions/events,
+and portfolio projections.
 A caller-selected state clone is a test fixture, never an alternate live state
 authority.
 
@@ -93,7 +97,9 @@ reply format, post-reply behavior, and non-escalation boundary. A
 route-set change is semantic. Before checkpointing, require the portfolio's
 scheduler revision, concurrency, active-route count, and exact structured route
 set to match the scheduler state used for the response; a stale projection is a
-checkpoint blocker, not a presentable status. A
+checkpoint blocker, not a presentable status. Also require portfolio schema v3,
+the exact frontier revision/safety mode, and a current FrontierCertificate for
+every row promoted beyond reconciliation. A
 status request consumes already-arrived route results unless the user explicitly
 requests a non-continuing read-only snapshot. `READY` with free capacity must be claimed. If a real turn or safety
 ceiling leaves it unclaimed, persist its owner, action ID, deadline, and wake
@@ -264,8 +270,8 @@ admitted contract.
 Operate the same global Coordinator as a portfolio event drain with a normally
 paused recovery lease:
 
-1. collect allowlisted state and authority signals, then run
-   `coordinator-plan`;
+1. collect allowlisted state and independently observed Git/authority
+   high-water signals, load the frontier ledger, then run `coordinator-plan`;
 2. handle a newly arrived review response, direction update, or project
    question first;
 3. claim only the returned action ID and start at most one new unit of work for
@@ -278,9 +284,12 @@ paused recovery lease:
 6. poll each exact ChatGPT Supervisor route once, then wait once for at most 60
    seconds on only the exact Codex Worker targets and cursors; never pass a
    ChatGPT chat ID to `wait_threads`;
-7. consume the first semantic result, complete only its route lease, persist the
-   transition, and recompute the plan; drain the mandatory protocol handoff to
-   its next external wait or terminal before checkpoint;
+7. consume the first semantic result with
+   `coordinator-action-apply-result`; delivery ACK alone is never completion.
+   The idempotent reducer validates exact identity and authority observation,
+   applies frontier CAS, Mission, scheduler, and portfolio v3 together, closes
+   only that route, and then recomputes the plan; drain the mandatory protocol
+   handoff to its next external wait or terminal before checkpoint;
 8. on an unchanged timeout, persist the wait set and checkpoint without another
    progress message; arm recovery only after the foreground wait ends;
 9. recovery reads only that wait set, and pauses when no route lease remains.
@@ -454,13 +463,13 @@ repair.
 
 Queue the normalized response durably before attempting delivery. This queue
 item is priority 1 and must share the exact repository, Mission, and attempt
-identity with the parked Mission. Remove it from `pending_user_responses` only
-after a successful exact-Supervisor send, record it in
-`routed_user_responses`, and advance the Mission to
-`SUPERVISOR_USER_RESPONSE_ADJUDICATION_REQUESTED`. The Supervisor's response
-then resumes only that Mission. Supervisor acceptance after a user reply may
-complete the Mission without another Work Order; repair and continuation still
-require a non-empty next Work Order.
+identity with the parked Mission. A successful exact-Supervisor send records
+`delivery_acknowledged` on the same pending item; it does not remove the item,
+advance the Mission, adopt the direction, or complete the route. Only an exact
+Supervisor result applied by the frontier transaction moves the input to its
+semantic disposition and resumes only that Mission. Supervisor acceptance
+after a user reply may complete the Mission without another Work Order; repair
+and continuation still require a non-empty next Work Order.
 
 ## Terminal handling
 

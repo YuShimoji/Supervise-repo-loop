@@ -43,18 +43,25 @@ only administrator operation.
 5. If every target is unchanged, persist no semantic state, emit no status or
    progress message, keep only the existing route leases, and return
    DONT_NOTIFY. Do not loop inside this wake.
-6. If one route has a semantic result, persist it and complete only that route
-   lease. Preserve every other recipient, delivery token, payload hash, and
-   cursor unchanged.
+6. If one route has a semantic result, use
+   coordinator-action-apply-result with the current independently collected
+   authority signal. The write-ahead reducer must validate the exact action,
+   recipient, result, frontier epoch, Git/authority observation, and Mission
+   CAS; then update frontier, Mission, scheduler, and portfolio v3 and close
+   only that route. A delivery token, cursor, ACK, or non-empty evidence string
+   is not a semantic result. Preserve every other recipient, delivery token,
+   payload hash, and cursor unchanged.
 7. A consumed result is a real event. From that point, continue the primary
    portfolio drain described in references/coordinator-task-prompt.md: process
    the resulting mandatory protocol handoff to its next external wait or
    terminal, fill safe capacity from other repositories, start at most one new
    unit of work per repository in the pass, then do one multi-target wait.
-8. Before any state-changing checkpoint, rebuild canonical portfolio JSON from
-   the same scheduler revision, including the exact structured active route
-   set, then run `portfolio-render`. Revision, capacity, route count, action,
-   recipient, token, cursor, or status mismatch forbids the checkpoint.
+8. Before any state-changing checkpoint, rebuild canonical portfolio JSON v3
+   from the same scheduler and frontier revisions, including the exact
+   structured active route set and FrontierCertificates, then run
+   `portfolio-render`. Scheduler/frontier revision, capacity, route count,
+   action, recipient, token, cursor, status, authority fingerprint, artifact,
+   branch, or HEAD mismatch forbids the checkpoint.
 9. Pause this automation as soon as a rebuilt plan reports
    watchdog_should_be_armed=false. Never leave an idle periodic model wake
    active.

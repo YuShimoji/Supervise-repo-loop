@@ -40,6 +40,16 @@ and Codex task-scheduler boundary.
 .\scripts\test.ps1
 ```
 
+Read-only frontier audit:
+
+```powershell
+python scripts/supervise_repo_loop.py frontier-audit --dry-run
+```
+
+The audit reports legacy-unverified or stale artifact frontiers without
+writing live state. See
+[frontier-reconciliation.md](docs/frontier-reconciliation.md).
+
 ## Preview or install static changes
 
 ```powershell

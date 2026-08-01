@@ -88,6 +88,24 @@
           "pattern": "^[0-9a-fA-F]{64}$"
         },
         "after_cursor": {"type": ["string", "null"]},
+        "delivery_ack_id": {"type": "string", "minLength": 1},
+        "external_lifecycle_state": {
+          "enum": ["created", "dispatched", "delivery_acknowledged", "result_received", "result_parsed", "result_validated", "result_applied", "failed", "stale_result_quarantined", "cancelled"]
+        },
+        "external_lifecycle_history": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["state", "at"],
+            "properties": {
+              "state": {"type": "string", "minLength": 1},
+              "at": {"type": "string", "minLength": 1},
+              "details": {"type": "object"}
+            },
+            "additionalProperties": true
+          }
+        },
         "claimed_at": {"type": "string"},
         "prepared_at": {"type": "string"},
         "sent_at": {"type": "string"},
@@ -165,7 +183,11 @@
         "requires_external_result": {"type": "boolean"},
         "state_fingerprint": {"type": "string", "minLength": 1},
         "outcome": {"type": "string", "minLength": 1},
-        "evidence": {"type": ["string", "null"]},
+        "evidence": {"type": ["string", "object", "null"]},
+        "external_lifecycle_state": {
+          "enum": ["result_applied", "failed", "stale_result_quarantined", "cancelled", "legacy_unverified"]
+        },
+        "external_lifecycle_history": {"type": "array"},
         "repository_id": {"type": ["string", "null"]},
         "route_class": {"type": ["string", "null"]},
         "recipient_thread_id": {"type": ["string", "null"]},

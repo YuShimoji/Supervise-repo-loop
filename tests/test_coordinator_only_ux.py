@@ -5,10 +5,11 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -185,6 +186,138 @@ def fixture(*, include_workers: bool = True) -> tuple[dict, dict, dict, dict]:
         },
     }
     return registry, hosts, adapter, coordinator
+
+
+def materialize_git_fixture_roots(
+    base: Path, registry: dict, hosts: dict, adapter: dict
+) -> None:
+    base.mkdir(parents=True, exist_ok=True)
+    host = hosts["hosts"][0]
+    host["workspace_roots"] = [str(base)]
+    for repository_id in (REPO_A, REPO_B):
+        token = repository_id.rsplit("/", 1)[-1]
+        root = base / token
+        root.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Frontier Fixture"],
+            cwd=root,
+            check=True,
+        )
+        (root / "README.md").write_text(
+            f"# {token}\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "fixture frontier"],
+            cwd=root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        host["known_repository_roots"][repository_id] = str(root)
+        host["root_verifications"][repository_id] = {
+            "root": str(root),
+            "repository_id": repository_id,
+        }
+        for binding in registry.get("worker_bindings", []):
+            if binding.get("repository_id") == repository_id:
+                binding["root_hint"] = str(root)
+        for thread in adapter.get("threads", []):
+            if (
+                thread.get("kind") == "codex"
+                and thread.get("repository_id") == repository_id
+            ):
+                thread["cwd"] = str(root)
+
+
+def certified_frontier_fixture(
+    registry: dict, signals: list[dict]
+) -> dict:
+    state = loop.default_frontier_state(
+        item["repository_id"] for item in registry["repositories"]
+    )
+    by_repository = {item["repository_id"]: item for item in signals}
+    for repository in registry["repositories"]:
+        repository_id = repository["repository_id"]
+        signal = by_repository[repository_id]
+        git = signal["git"]
+        token = repository_id.rsplit("/", 1)[-1]
+        loop.apply_frontier_event(
+            state,
+            {
+                "repository_id": repository_id,
+                "lane_id": repository["default_supervision_lane"],
+                "frontier_epoch": 1,
+                "frontier_event_id": f"frontier-{token}",
+                "artifact_id": f"artifact-{token}",
+                "artifact_revision": "fixture-current",
+                "artifact_sha256": loop.sha256_text(f"artifact-{token}"),
+                "branch": git.get("branch"),
+                "head_sha": git.get("head_sha"),
+                "disposition": "accepted",
+                "source_actor": "supervisor",
+                "source_message_id": f"message-{token}",
+                "source_result_id": f"result-{token}",
+                "based_on_frontier_epoch": 0,
+                "supersedes_event_ids": [],
+                "recorded_at": "2026-08-02T00:00:00Z",
+            },
+        )
+    return state
+
+
+def bind_mission_to_frontier(mission_value: dict, signal: dict) -> dict:
+    bound = copy.deepcopy(mission_value)
+    token = bound["repository_id"].rsplit("/", 1)[-1]
+    bound["value_contract"]["authority_fingerprint"] = signal[
+        "authority_fingerprint"
+    ]
+    bound["active_artifact"] = {
+        "artifact_id": f"artifact-{token}",
+        "artifact_revision": "fixture-current",
+        "artifact_sha256": loop.sha256_text(f"artifact-{token}"),
+    }
+    return bound
+
+
+def mark_semantic_result_applied(
+    scheduler: dict, action_id: str, result_id: str
+) -> dict:
+    lease = next(
+        item for item in scheduler["route_leases"] if item["action_id"] == action_id
+    )
+    for state in (
+        "result_received",
+        "result_parsed",
+        "result_validated",
+        "result_applied",
+    ):
+        loop._set_external_lifecycle(  # noqa: SLF001 - scheduler unit boundary
+            lease, state, details={"result_id": result_id}
+        )
+    return {
+        "result_id": result_id,
+        "source_thread_id": lease["recipient_thread_id"],
+        "source_turn_id": f"turn-{result_id}",
+        "source_message_id": f"message-{result_id}",
+        "disposition": "accepted",
+        "frontier_event_id": f"frontier-{result_id}",
+        "frontier_epoch": 1,
+        "authority_fingerprint": "f" * 64,
+        "result_sha256": loop.sha256_text(result_id),
+    }
 
 
 def fixture_value_contract() -> dict:
@@ -688,13 +821,20 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             routed["recipient_thread_id"], gated["supervisor_thread_id"]
         )
-        self.assertEqual(gated["state"], loop.USER_RESPONSE_ADJUDICATION_STATE)
-        awaiting_verdict = loop.select_next_actionable_repository(
+        self.assertEqual(gated["state"], "USER_DECISION")
+        self.assertFalse(routed["semantic_result_applied"])
+        awaiting_result = loop.select_next_actionable_repository(
             registry, hosts, adapter, [gated, other], coordinator
         )
-        self.assertEqual(awaiting_verdict["repository_id"], REPO_A)
-        self.assertEqual(awaiting_verdict["selection_priority"], 2)
+        self.assertEqual(awaiting_result["repository_id"], REPO_A)
+        self.assertEqual(awaiting_result["selection_priority"], 1)
 
+        gated["last_routed_user_response_id"] = queued["response_id"]
+        loop._record_state(  # noqa: SLF001 - synthetic semantic-result boundary
+            gated,
+            loop.USER_RESPONSE_ADJUDICATION_STATE,
+            {"response_id": queued["response_id"], "result_received": True},
+        )
         loop.apply_supervisor_verdict(gated, "accept")
         self.assertEqual(gated["state"], "COMPLETE")
         self.assertEqual(gated["review_status"], "accepted")
@@ -794,13 +934,17 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             routed_mission = loop.load_json(mission_path)
             routed_state = loop.load_json(coordinator_path)
             self.assertEqual(
-                routed_mission["state"], loop.USER_RESPONSE_ADJUDICATION_STATE
+                routed_mission["state"], "USER_DECISION"
             )
-            self.assertEqual(routed_state["pending_user_responses"], [])
             self.assertEqual(
-                routed_state["routed_user_responses"][-1]["recipient_thread_id"],
+                routed_state["pending_user_responses"][0]["recipient_thread_id"],
                 gated["supervisor_thread_id"],
             )
+            self.assertEqual(
+                routed_state["pending_user_responses"][0]["response_state"],
+                "delivery_acknowledged",
+            )
+            self.assertEqual(routed_state.get("routed_user_responses", []), [])
 
     def test_T47_consumed_continuation_is_not_reselected(self) -> None:
         registry, hosts, adapter, coordinator = fixture()
@@ -921,8 +1065,11 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         loop.mark_coordinator_action_sent(
             scheduler, first_id, first_recipient, packet_sha256="a" * 64
         )
+        evidence_a = mark_semantic_result_applied(
+            scheduler, first_id, "supervisor-result-a"
+        )
         loop.complete_coordinator_action(
-            scheduler, first_id, "no_work", evidence="supervisor-result-a"
+            scheduler, first_id, "no_work", evidence=evidence_a
         )
 
         second = loop.build_coordinator_plan(
@@ -943,8 +1090,11 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         loop.mark_coordinator_action_sent(
             scheduler, second_id, second_recipient, packet_sha256="b" * 64
         )
+        evidence_b = mark_semantic_result_applied(
+            scheduler, second_id, "supervisor-result-b"
+        )
         loop.complete_coordinator_action(
-            scheduler, second_id, "no_work", evidence="supervisor-result-b"
+            scheduler, second_id, "no_work", evidence=evidence_b
         )
 
         idle = loop.build_coordinator_plan(
@@ -1071,6 +1221,9 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         scheduler = loop.default_scheduler_state()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            materialize_git_fixture_roots(
+                root / "repositories", registry, hosts, adapter
+            )
             paths = {
                 "registry": root / "registry.json",
                 "hosts": root / "hosts.json",
@@ -1224,16 +1377,23 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         loop.acknowledge_coordinator_event_routed(
             coordinator, queued["event_id"], recipient
         )
-        loop.complete_coordinator_action(
-            scheduler, action_id, "routed", evidence="supervisor-ack"
+        loop.acknowledge_coordinator_action_delivery(
+            scheduler, action_id, "supervisor-ack"
         )
+        with self.assertRaisesRegex(loop.ProtocolError, "result_applied"):
+            loop.complete_coordinator_action(
+                scheduler, action_id, "routed", evidence="supervisor-ack"
+            )
         resumed = loop.build_coordinator_plan(
             registry, hosts, adapter, [other], coordinator, scheduler
         )
         self.assertEqual(other["state"], "WORK_ORDER_RECEIVED")
-        self.assertNotEqual(
-            (resumed.get("next_action") or {}).get("action_id"), action_id
+        self.assertEqual(
+            scheduler["route_leases"][0]["external_lifecycle_state"],
+            "delivery_acknowledged",
         )
+        self.assertTrue(resumed["has_inflight_work"])
+        self.assertEqual(coordinator["pending_user_events"][0]["state"], "delivery_acknowledged")
 
     def test_T60_historical_blocked_does_not_poison_newer_complete_frontier(self) -> None:
         _, _, _, coordinator = fixture()
@@ -1244,17 +1404,21 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         snapshot = loop.build_coordinator_snapshot([old, current], coordinator)
         self.assertEqual(snapshot["project_states"][0]["run_state"], "complete")
 
-    def test_T61_cli_persists_claim_send_and_completion_lifecycle(self) -> None:
+    def test_T61_cli_persists_delivery_without_semantic_completion(self) -> None:
         registry, hosts, adapter, coordinator = fixture()
         scheduler = loop.default_scheduler_state()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            materialize_git_fixture_roots(
+                root / "repositories", registry, hosts, adapter
+            )
             paths = {
                 "registry": root / "registry.json",
                 "hosts": root / "hosts.json",
                 "adapter": root / "adapter.json",
                 "coordinator": root / "coordinator.json",
                 "scheduler": root / "scheduler.json",
+                "frontier": root / "frontier.json",
                 "missions": root / "missions",
             }
             paths["missions"].mkdir()
@@ -1266,9 +1430,19 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 ("scheduler", scheduler),
             ):
                 loop.atomic_write_json(paths[name], value)
+            signals = loop.collect_authority_signals(registry, hosts, adapter)
+            signal_by_repository = {
+                item["repository_id"]: item for item in signals
+            }
+            loop.atomic_write_json(
+                paths["frontier"], certified_frontier_fixture(registry, signals)
+            )
             loop.atomic_write_json(
                 paths["missions"] / "dispatch.json",
-                mission(REPO_A, "WORK_ORDER_RECEIVED", mission_id="dispatch"),
+                bind_mission_to_frontier(
+                    mission(REPO_A, "WORK_ORDER_RECEIVED", mission_id="dispatch"),
+                    signal_by_repository[REPO_A],
+                ),
             )
             common = [
                 "--registry",
@@ -1283,6 +1457,8 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 str(paths["scheduler"]),
                 "--missions-dir",
                 str(paths["missions"]),
+                "--frontier-state",
+                str(paths["frontier"]),
             ]
 
             plan_out = io.StringIO()
@@ -1359,6 +1535,24 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 self.assertEqual(
                     loop.main(
                         [
+                            "coordinator-action-delivery-ack",
+                            "--action-id",
+                            action_id,
+                            "--delivery-ack-id",
+                            "receipt-1",
+                            "--scheduler-state",
+                            str(paths["scheduler"]),
+                            "--coordinator-state",
+                            str(paths["coordinator"]),
+                        ]
+                    ),
+                    0,
+                )
+            stderr = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                self.assertEqual(
+                    loop.main(
+                        [
                             "coordinator-action-complete",
                             "--action-id",
                             action_id,
@@ -1372,23 +1566,16 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                             str(paths["coordinator"]),
                         ]
                     ),
-                    0,
+                    2,
                 )
-            completed = loop.load_scheduler_state(paths["scheduler"])
-            self.assertIsNone(completed["scheduler_claim"])
-            self.assertEqual(completed["route_leases"], [])
+            self.assertIn("result_applied", stderr.getvalue())
+            delivered = loop.load_scheduler_state(paths["scheduler"])
+            self.assertIsNone(delivered["scheduler_claim"])
+            self.assertEqual(len(delivered["route_leases"]), 1)
+            self.assertEqual(delivered["completed_actions"], [])
             self.assertEqual(
-                completed["completed_actions"][-1]["action_id"], action_id
-            )
-            self.assertEqual(
-                completed["completed_actions"][-1]["evidence"], "receipt-1"
-            )
-            self.assertEqual(
-                completed["completed_actions"][-1]["packet_sha256"], "a" * 64
-            )
-            self.assertRegex(
-                completed["completed_actions"][-1]["delivery_token"],
-                r"^[0-9a-f]{64}$",
+                delivered["route_leases"][0]["external_lifecycle_state"],
+                "delivery_acknowledged",
             )
 
     def test_T62_snapshot_availability_never_rearms_recovery(self) -> None:
@@ -1459,10 +1646,20 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         loop.mark_coordinator_action_sent(
             scheduler, action_id, recipient, packet_sha256="d" * 64
         )
-        with self.assertRaisesRegex(loop.ProtocolError, "result evidence"):
+        with self.assertRaisesRegex(loop.ProtocolError, "result_applied"):
             loop.complete_coordinator_action(scheduler, action_id, "accepted")
+        with self.assertRaisesRegex(loop.ProtocolError, "result_applied"):
+            loop.complete_coordinator_action(
+                scheduler,
+                action_id,
+                "accepted",
+                evidence="worker-result-receipt",
+            )
+        result_evidence = mark_semantic_result_applied(
+            scheduler, action_id, "worker-result-receipt"
+        )
         loop.complete_coordinator_action(
-            scheduler, action_id, "accepted", evidence="worker-result-receipt"
+            scheduler, action_id, "accepted", evidence=result_evidence
         )
 
     def test_T65_sent_action_cannot_be_released_for_duplicate_retry(self) -> None:
@@ -1534,7 +1731,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             REPO_A,
         )
 
-    def test_T68_identical_project_question_can_recur_after_routing(self) -> None:
+    def test_T68_identical_question_recurs_only_after_semantic_result(self) -> None:
         _, _, _, coordinator = fixture()
         first = loop.queue_coordinator_event(
             coordinator,
@@ -1559,10 +1756,13 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             repository_id=REPO_A,
             raw_text="Is this evidence still current?",
         )
-        self.assertFalse(second["deduplicated"])
-        self.assertNotEqual(second["event_id"], first["event_id"])
+        self.assertTrue(second["deduplicated"])
+        self.assertEqual(second["event_id"], first["event_id"])
         self.assertEqual(first["event"]["occurrence"], 1)
-        self.assertEqual(second["event"]["occurrence"], 2)
+        self.assertEqual(
+            coordinator["pending_user_events"][0]["state"],
+            "delivery_acknowledged",
+        )
 
     def test_T69_user_event_changes_the_semantic_plan_fingerprint(self) -> None:
         registry, hosts, adapter, coordinator = fixture()
@@ -1678,7 +1878,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             "the Coordinator prompt must have one unambiguous JSON contract",
         )
         contract = json.loads(encoded_contracts[0])
-        self.assertEqual(contract["contract_version"], 7)
+        self.assertEqual(contract["contract_version"], 8)
 
         self.assertEqual(
             contract["scheduler"],
@@ -1725,7 +1925,16 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             contract["status"]["update_policy"], "semantic_change_only"
         )
-        self.assertEqual(contract["status"]["schema_version"], 2)
+        self.assertEqual(contract["status"]["schema_version"], 3)
+        self.assertEqual(
+            contract["frontier"]["external_result_application"],
+            "coordinator-action-apply-result",
+        )
+        self.assertFalse(contract["frontier"]["delivery_ack_is_result"])
+        self.assertIn(
+            "frontier_gate",
+            contract["capability_gate"]["required_plan_fields"],
+        )
         self.assertEqual(contract["status"]["renderer"], "portfolio-render")
         self.assertEqual(
             contract["status"]["graph"], "mermaid_inline_and_markdown_index"
@@ -1741,7 +1950,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             contract["status"]["checkpoint_consistency"],
             {
-                "source": "same_scheduler_revision_and_active_route_set",
+                "source": "same_scheduler_and_frontier_revisions_and_active_route_set",
                 "projection_order": "json_then_render_then_verify",
                 "on_mismatch": "CHECKPOINT_FORBIDDEN",
             },
@@ -1750,6 +1959,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             set(contract["input_lineage"]["states"]),
             {
                 "RECEIVED",
+                "DELIVERY_ACKNOWLEDGED",
                 "ROUTED",
                 "ADOPTED",
                 "DEFERRED",
@@ -1804,6 +2014,9 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 "required_plan_fields": [
                     "scheduler_claim",
                     "primary_writer_task_id",
+                    "frontier_revision",
+                    "frontier_safety_mode",
+                    "frontier_gate",
                     "active_routes",
                     "ready_actions",
                     "required_handoff_actions",

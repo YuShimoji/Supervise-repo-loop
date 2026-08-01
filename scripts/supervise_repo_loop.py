@@ -38,6 +38,8 @@ DEFAULT_TERMINALS = SKILL_ROOT / "state" / "terminal_packets"
 DEFAULT_NOTIFICATION_LEDGER = SKILL_ROOT / "state" / "notification-ledger.v2.json"
 DEFAULT_PORTFOLIO_JSON = SKILL_ROOT / "state" / "coordinator-current-status.v1.json"
 DEFAULT_PORTFOLIO_MARKDOWN = SKILL_ROOT / "state" / "coordinator-current-status.md"
+DEFAULT_FRONTIER_STATE = SKILL_ROOT / "state" / "frontier-ledger.v1.json"
+DEFAULT_FRONTIER_JOURNAL = SKILL_ROOT / "state" / "frontier-transactions"
 PROTOCOL_PATH = SKILL_ROOT / "references" / "protocol-v2.md"
 
 COORDINATOR_PROMPT_THIS_REPOSITORY = (
@@ -55,6 +57,55 @@ MISSION_VALUE_CONTRACT_VERSION = 1
 MISSION_WORK_CLASSES = {"quick_win", "bounded_slice", "strategic_bet"}
 MISSION_OBJECTIVE_FITS = {"direct", "enabling", "exploratory"}
 PRIMARY_WRITER_REBIND_CONFIRMATION = "REBIND_PRIMARY_COORDINATOR_WRITER"
+FRONTIER_STATE_VERSION = 1
+FRONTIER_PORTFOLIO_VERSION = 3
+FRONTIER_SAFETY_MODE = "TRANSPORT_ONLY_RECONCILIATION"
+FRONTIER_DISPOSITIONS = {
+    "active",
+    "accepted",
+    "rejected",
+    "superseded",
+    "parked",
+    "none",
+}
+FRONTIER_SOURCE_ACTORS = {
+    "human",
+    "supervisor",
+    "worker",
+    "repo_observation",
+    "coordinator",
+}
+FRONTIER_SOURCE_PRECEDENCE = {
+    "coordinator": 1,
+    "repo_observation": 2,
+    "worker": 3,
+    "supervisor": 4,
+    "human": 5,
+}
+FRONTIER_ADVANCE_DISPOSITIONS = {"active", "accepted"}
+EXTERNAL_RESULT_LIFECYCLE_STATES = {
+    "created",
+    "dispatched",
+    "delivery_acknowledged",
+    "result_received",
+    "result_parsed",
+    "result_validated",
+    "result_applied",
+    "failed",
+    "stale_result_quarantined",
+    "cancelled",
+}
+EXTERNAL_RESULT_COMPATIBILITY_STATES = {"legacy_unverified"}
+FRONTIER_TRANSPORT_ACTION_KINDS = {
+    "route_direction_update",
+    "route_project_question",
+    "route_user_response",
+    "clarify_event_route",
+}
+FRONTIER_RECONCILIATION_ACTION_KINDS = {
+    "reconcile_repository_frontier",
+    "reconcile_repository_authority",
+}
 
 MODES = {"coordinator", "worker", "single-thread", "binding-repair"}
 TERMINAL_STATES = {
@@ -366,6 +417,596 @@ def atomic_write_bytes(path: Path | str, value: bytes) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+
+
+def _frontier_key(repository_id: str, lane_id: str) -> str:
+    repository = str(repository_id or "").strip()
+    lane = str(lane_id or "").strip()
+    if not repository or not lane:
+        raise ProtocolError("frontier identity requires repository_id and lane_id")
+    return f"{repository}|{lane}"
+
+
+def default_frontier_state(
+    repository_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Return a non-authoritative legacy migration boundary.
+
+    Missing legacy lineage is deliberately represented as ``legacy_unverified``;
+    no current artifact is inferred from timestamps, filenames, or Mission order.
+    """
+    repositories = sorted(
+        {str(item).strip() for item in repository_ids if str(item).strip()}
+    )
+    return {
+        "schema_version": FRONTIER_STATE_VERSION,
+        "revision": 0,
+        "safety_mode": FRONTIER_SAFETY_MODE,
+        "records": {},
+        "events": [],
+        "repository_status": {
+            repository_id: "legacy_unverified"
+            for repository_id in repositories
+        },
+        "retired_artifacts": [],
+        "applied_results": [],
+        "quarantined_results": [],
+        "failed_results": [],
+    }
+
+
+def migrate_frontier_state(
+    state: dict[str, Any] | None,
+    repository_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    if state is None:
+        return default_frontier_state(repository_ids)
+    if not isinstance(state, dict):
+        raise ProtocolError("frontier state must be an object")
+    if state.get("schema_version") != FRONTIER_STATE_VERSION:
+        raise ProtocolError("unsupported frontier state schema")
+    migrated = copy.deepcopy(state)
+    migrated.setdefault("revision", 0)
+    migrated.setdefault("safety_mode", FRONTIER_SAFETY_MODE)
+    migrated.setdefault("records", {})
+    migrated.setdefault("events", [])
+    migrated.setdefault("repository_status", {})
+    migrated.setdefault("retired_artifacts", [])
+    migrated.setdefault("applied_results", [])
+    migrated.setdefault("quarantined_results", [])
+    migrated.setdefault("failed_results", [])
+    for repository_id in repository_ids:
+        normalized = str(repository_id or "").strip()
+        if normalized:
+            migrated["repository_status"].setdefault(
+                normalized, "legacy_unverified"
+            )
+    validate_frontier_state(migrated)
+    return migrated
+
+
+def load_frontier_state(
+    path: Path | str,
+    repository_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    target = Path(path)
+    raw = load_json(target) if target.is_file() else None
+    return migrate_frontier_state(raw, repository_ids)
+
+
+def validate_frontier_record(record: Any) -> None:
+    if not isinstance(record, dict):
+        raise ProtocolError("FrontierRecord must be an object")
+    required = (
+        "repository_id",
+        "lane_id",
+        "frontier_epoch",
+        "frontier_event_id",
+        "artifact_id",
+        "artifact_revision",
+        "artifact_sha256",
+        "branch",
+        "head_sha",
+        "disposition",
+        "source_actor",
+        "source_message_id",
+        "source_result_id",
+        "based_on_frontier_epoch",
+        "supersedes_event_ids",
+        "recorded_at",
+    )
+    missing = [field for field in required if field not in record]
+    if missing:
+        raise ProtocolError("FrontierRecord missing: " + ", ".join(missing))
+    _frontier_key(record["repository_id"], record["lane_id"])
+    epoch = record.get("frontier_epoch")
+    based_on = record.get("based_on_frontier_epoch")
+    if not isinstance(epoch, int) or epoch < 1:
+        raise ProtocolError("FrontierRecord frontier_epoch must be positive")
+    if not isinstance(based_on, int) or based_on < 0 or epoch != based_on + 1:
+        raise ProtocolError(
+            "FrontierRecord epoch must be based_on_frontier_epoch + 1"
+        )
+    for field in (
+        "frontier_event_id",
+        "source_message_id",
+        "source_result_id",
+        "recorded_at",
+    ):
+        if not isinstance(record.get(field), str) or not record[field].strip():
+            raise ProtocolError(f"FrontierRecord requires {field}")
+    for field in ("artifact_id", "artifact_revision", "branch"):
+        if record.get(field) is not None and (
+            not isinstance(record[field], str) or not record[field].strip()
+        ):
+            raise ProtocolError(f"FrontierRecord {field} must be string or null")
+    for field, length in (("artifact_sha256", 64), ("head_sha", 40)):
+        value = record.get(field)
+        if value is not None and not re.fullmatch(
+            rf"[0-9a-fA-F]{{{length}}}", str(value)
+        ):
+            raise ProtocolError(f"FrontierRecord {field} has invalid digest")
+    if record.get("disposition") not in FRONTIER_DISPOSITIONS:
+        raise ProtocolError("FrontierRecord disposition is invalid")
+    if record.get("source_actor") not in FRONTIER_SOURCE_ACTORS:
+        raise ProtocolError("FrontierRecord source_actor is invalid")
+    supersedes = record.get("supersedes_event_ids")
+    if not isinstance(supersedes, list) or any(
+        not isinstance(item, str) or not item for item in supersedes
+    ):
+        raise ProtocolError("FrontierRecord supersedes_event_ids is invalid")
+    if record.get("disposition") == "none" and any(
+        record.get(field) is not None
+        for field in ("artifact_id", "artifact_revision", "artifact_sha256")
+    ):
+        raise ProtocolError("FrontierRecord disposition none cannot name an artifact")
+
+
+def validate_frontier_state(state: dict[str, Any]) -> None:
+    if state.get("schema_version") != FRONTIER_STATE_VERSION:
+        raise ProtocolError("unsupported frontier state schema")
+    if not isinstance(state.get("revision"), int) or state["revision"] < 0:
+        raise ProtocolError("frontier revision must be non-negative")
+    if state.get("safety_mode") not in {
+        FRONTIER_SAFETY_MODE,
+        "FRONTIER_VERIFIED",
+    }:
+        raise ProtocolError("frontier safety_mode is invalid")
+    records = state.get("records")
+    events = state.get("events")
+    if not isinstance(records, dict) or not isinstance(events, list):
+        raise ProtocolError("frontier records/events have invalid shape")
+    event_by_id: dict[str, dict[str, Any]] = {}
+    for index, event in enumerate(events):
+        validate_frontier_record(event)
+        event_id = str(event["frontier_event_id"])
+        if event_id in event_by_id:
+            raise ProtocolError(f"duplicate frontier event: {event_id}")
+        event_by_id[event_id] = event
+    for key, record in records.items():
+        validate_frontier_record(record)
+        if key != _frontier_key(record["repository_id"], record["lane_id"]):
+            raise ProtocolError("frontier record key mismatch")
+        if event_by_id.get(str(record["frontier_event_id"])) != record:
+            raise ProtocolError("current frontier record must exist in event ledger")
+    if not isinstance(state.get("repository_status"), dict):
+        raise ProtocolError("frontier repository_status must be an object")
+    for field in (
+        "retired_artifacts",
+        "applied_results",
+        "quarantined_results",
+        "failed_results",
+    ):
+        if not isinstance(state.get(field), list):
+            raise ProtocolError(f"frontier {field} must be an array")
+
+
+def _retire_frontier_artifact(
+    state: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    disposition: str,
+) -> None:
+    artifact_id = record.get("artifact_id")
+    if not artifact_id:
+        return
+    identity = {
+        "repository_id": record["repository_id"],
+        "lane_id": record["lane_id"],
+        "artifact_id": artifact_id,
+        "artifact_revision": record.get("artifact_revision"),
+        "artifact_sha256": record.get("artifact_sha256"),
+        "frontier_event_id": record["frontier_event_id"],
+        "frontier_epoch": record["frontier_epoch"],
+        "disposition": disposition,
+        "source_actor": record["source_actor"],
+        "source_precedence": FRONTIER_SOURCE_PRECEDENCE[record["source_actor"]],
+    }
+    retired = state.setdefault("retired_artifacts", [])
+    if not any(
+        isinstance(item, dict)
+        and item.get("repository_id") == identity["repository_id"]
+        and item.get("lane_id") == identity["lane_id"]
+        and item.get("artifact_id") == identity["artifact_id"]
+        and item.get("frontier_event_id") == identity["frontier_event_id"]
+        for item in retired
+    ):
+        retired.append(identity)
+
+
+def apply_frontier_event(
+    state: dict[str, Any], candidate: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply one CAS-bound monotonic frontier event or reject it unchanged."""
+    validate_frontier_state(state)
+    validate_frontier_record(candidate)
+    event_id = str(candidate["frontier_event_id"])
+    existing_event = next(
+        (
+            item
+            for item in state["events"]
+            if isinstance(item, dict)
+            and item.get("frontier_event_id") == event_id
+        ),
+        None,
+    )
+    if existing_event is not None:
+        if existing_event != candidate:
+            raise ProtocolError("conflicting frontier event replay")
+        return {
+            "classification": "FRONTIER_EVENT_ALREADY_APPLIED",
+            "frontier_event_id": event_id,
+            "deduplicated": True,
+        }
+    key = _frontier_key(candidate["repository_id"], candidate["lane_id"])
+    current = state["records"].get(key)
+    current_epoch = int(current.get("frontier_epoch", 0)) if current else 0
+    if candidate["based_on_frontier_epoch"] != current_epoch:
+        return {
+            "classification": "FRONTIER_EVENT_STALE",
+            "frontier_event_id": event_id,
+            "expected_frontier_epoch": current_epoch,
+            "based_on_frontier_epoch": candidate["based_on_frontier_epoch"],
+            "deduplicated": False,
+        }
+    candidate_precedence = FRONTIER_SOURCE_PRECEDENCE[candidate["source_actor"]]
+    if isinstance(current, dict):
+        current_precedence = FRONTIER_SOURCE_PRECEDENCE[current["source_actor"]]
+        if candidate_precedence < current_precedence:
+            return {
+                "classification": "FRONTIER_EVENT_PRECEDENCE_REJECTED",
+                "frontier_event_id": event_id,
+                "current_source_actor": current["source_actor"],
+                "candidate_source_actor": candidate["source_actor"],
+                "deduplicated": False,
+            }
+        changes_artifact = candidate.get("artifact_id") != current.get("artifact_id")
+        if (
+            changes_artifact
+            and current.get("artifact_id")
+            and current["frontier_event_id"]
+            not in candidate.get("supersedes_event_ids", [])
+        ):
+            return {
+                "classification": "FRONTIER_EVENT_SUPERSESSION_REQUIRED",
+                "frontier_event_id": event_id,
+                "current_frontier_event_id": current["frontier_event_id"],
+                "deduplicated": False,
+            }
+    for retired in state.get("retired_artifacts", []):
+        if not isinstance(retired, dict):
+            continue
+        same_artifact = (
+            retired.get("repository_id") == candidate["repository_id"]
+            and retired.get("lane_id") == candidate["lane_id"]
+            and retired.get("artifact_id") == candidate.get("artifact_id")
+        )
+        if (
+            same_artifact
+            and candidate.get("disposition") in FRONTIER_ADVANCE_DISPOSITIONS
+            and candidate_precedence < int(retired.get("source_precedence", 0))
+        ):
+            return {
+                "classification": "FRONTIER_EVENT_PRECEDENCE_REJECTED",
+                "frontier_event_id": event_id,
+                "retired_frontier_event_id": retired.get("frontier_event_id"),
+                "deduplicated": False,
+            }
+    next_state = copy.deepcopy(state)
+    if isinstance(current, dict):
+        if current.get("artifact_id") != candidate.get("artifact_id"):
+            _retire_frontier_artifact(
+                next_state, current, disposition="superseded"
+            )
+        elif candidate.get("disposition") in {
+            "rejected",
+            "superseded",
+            "parked",
+        }:
+            _retire_frontier_artifact(
+                next_state,
+                candidate,
+                disposition=str(candidate["disposition"]),
+            )
+    next_state["events"].append(copy.deepcopy(candidate))
+    next_state["records"][key] = copy.deepcopy(candidate)
+    repository_records = [
+        item
+        for item in next_state["records"].values()
+        if isinstance(item, dict)
+        and item.get("repository_id") == candidate["repository_id"]
+    ]
+    eligible_record = bool(repository_records) and all(
+        item.get("disposition") in FRONTIER_ADVANCE_DISPOSITIONS
+        and bool(item.get("artifact_id"))
+        and bool(item.get("artifact_revision"))
+        and bool(item.get("artifact_sha256"))
+        and bool(item.get("branch"))
+        and bool(item.get("head_sha"))
+        for item in repository_records
+    )
+    next_state["repository_status"][candidate["repository_id"]] = (
+        "verified" if eligible_record else "reconciliation_required"
+    )
+    next_state["revision"] = int(next_state["revision"]) + 1
+    if all(
+        status == "verified"
+        for status in next_state["repository_status"].values()
+    ):
+        next_state["safety_mode"] = "FRONTIER_VERIFIED"
+    else:
+        next_state["safety_mode"] = FRONTIER_SAFETY_MODE
+    validate_frontier_state(next_state)
+    state.clear()
+    state.update(next_state)
+    return {
+        "classification": "FRONTIER_EVENT_APPLIED",
+        "frontier_event_id": event_id,
+        "frontier_epoch": candidate["frontier_epoch"],
+        "deduplicated": False,
+    }
+
+
+def _frontier_certificate_payload(
+    record: dict[str, Any], authority_signal: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "schema_version": FRONTIER_STATE_VERSION,
+        "repository_id": record["repository_id"],
+        "lane_id": record["lane_id"],
+        "frontier_epoch": record["frontier_epoch"],
+        "frontier_event_id": record["frontier_event_id"],
+        "artifact_id": record.get("artifact_id"),
+        "artifact_revision": record.get("artifact_revision"),
+        "artifact_sha256": record.get("artifact_sha256"),
+        "branch": record.get("branch"),
+        "head_sha": record.get("head_sha"),
+        "disposition": record["disposition"],
+        "source_actor": record["source_actor"],
+        "authority_fingerprint": authority_signal.get("authority_fingerprint"),
+    }
+
+
+def validate_authority_signal_liveness(authority_signal: Any) -> None:
+    """Require independently observable Git and configured authority sources."""
+    if not isinstance(authority_signal, dict):
+        raise ProtocolError("authority signal must be an object")
+    fingerprint = str(authority_signal.get("authority_fingerprint") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", fingerprint):
+        raise ProtocolError("authority signal fingerprint is invalid")
+    payload = {
+        key: value
+        for key, value in authority_signal.items()
+        if key != "authority_fingerprint"
+    }
+    if canonical_json_hash(payload) != fingerprint:
+        raise ProtocolError("authority signal fingerprint does not match content")
+    if not str(authority_signal.get("root") or ""):
+        raise ProtocolError("authority signal repository root is unavailable")
+    git = authority_signal.get("git")
+    if not isinstance(git, dict) or git.get("status") != "present":
+        raise ProtocolError("authority signal Git high-water state is unavailable")
+    if not str(git.get("branch") or "").strip():
+        raise ProtocolError("authority signal Git branch is unavailable")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", str(git.get("head_sha") or "")):
+        raise ProtocolError("authority signal Git HEAD is invalid")
+    if authority_signal.get("authority_watch_configured") is True:
+        sources = authority_signal.get("sources")
+        high_water_marks = authority_signal.get("high_water_marks")
+        if not isinstance(sources, list) or not sources:
+            raise ProtocolError("configured authority sources are missing")
+        if any(
+            not isinstance(source, dict)
+            or source.get("status") != "present"
+            or not re.fullmatch(
+                r"[0-9a-fA-F]{64}", str(source.get("sha256") or "")
+            )
+            for source in sources
+        ):
+            raise ProtocolError("configured authority source is not live")
+        if not isinstance(high_water_marks, list) or len(high_water_marks) != len(
+            sources
+        ):
+            raise ProtocolError("authority high-water marks are incomplete")
+        if any(
+            not isinstance(mark, dict) or mark.get("exists") is not True
+            for mark in high_water_marks
+        ):
+            raise ProtocolError("authority high-water source no longer exists")
+
+
+def issue_frontier_certificate(
+    state: dict[str, Any],
+    repository_id: str,
+    lane_id: str,
+    authority_signal: dict[str, Any],
+) -> dict[str, Any]:
+    validate_frontier_state(state)
+    key = _frontier_key(repository_id, lane_id)
+    record = state["records"].get(key)
+    if not isinstance(record, dict):
+        raise ProtocolError("frontier certificate requires a current record")
+    if record.get("disposition") not in FRONTIER_ADVANCE_DISPOSITIONS:
+        raise ProtocolError("frontier certificate requires an eligible disposition")
+    if (
+        not str(record.get("artifact_id") or "").strip()
+        or not str(record.get("artifact_revision") or "").strip()
+        or not re.fullmatch(
+            r"[0-9a-fA-F]{64}", str(record.get("artifact_sha256") or "")
+        )
+    ):
+        raise ProtocolError("frontier certificate requires an exact artifact")
+    if not str(record.get("branch") or "").strip():
+        raise ProtocolError("frontier certificate requires an exact branch")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", str(record.get("head_sha") or "")):
+        raise ProtocolError("frontier certificate requires an exact HEAD")
+    if authority_signal.get("repository_id") != repository_id:
+        raise ProtocolError("frontier certificate authority repository mismatch")
+    validate_authority_signal_liveness(authority_signal)
+    git = authority_signal.get("git")
+    if not isinstance(git, dict):
+        raise ProtocolError("frontier certificate requires Git high-water state")
+    if git.get("branch") != record.get("branch"):
+        raise ProtocolError("frontier certificate branch mismatch")
+    if git.get("head_sha") != record.get("head_sha"):
+        raise ProtocolError("frontier certificate head mismatch")
+    payload = _frontier_certificate_payload(record, authority_signal)
+    payload["certificate_id"] = canonical_json_hash(payload)
+    return payload
+
+
+def validate_frontier_certificate(
+    certificate: Any,
+    state: dict[str, Any],
+    authority_signal: dict[str, Any],
+    *,
+    expected_artifact: dict[str, Any] | None = None,
+) -> None:
+    if not isinstance(certificate, dict):
+        raise ProtocolError("frontier certificate must be an object")
+    repository_id = str(certificate.get("repository_id") or "")
+    lane_id = str(certificate.get("lane_id") or "")
+    current = state.get("records", {}).get(_frontier_key(repository_id, lane_id))
+    if not isinstance(current, dict):
+        raise ProtocolError("frontier certificate has no current frontier")
+    expected = issue_frontier_certificate(
+        state, repository_id, lane_id, authority_signal
+    )
+    if certificate != expected:
+        raise ProtocolError("frontier certificate is stale or does not match current frontier")
+    if expected_artifact is not None:
+        aliases = {
+            "artifact_id": ("artifact_id", "id"),
+            "artifact_revision": ("artifact_revision", "revision"),
+            "artifact_sha256": ("artifact_sha256", "sha256"),
+        }
+        for frontier_field, fields in aliases.items():
+            value = next(
+                (expected_artifact[field] for field in fields if field in expected_artifact),
+                None,
+            )
+            if value is not None and certificate.get(frontier_field) != value:
+                raise ProtocolError("frontier certificate artifact is historical")
+
+
+def frontier_gate_decision(
+    state: dict[str, Any],
+    repository_id: str,
+    lane_id: str,
+    *,
+    action_kind: str,
+    expected_artifact: dict[str, Any] | None,
+    authority_signal: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if action_kind in FRONTIER_RECONCILIATION_ACTION_KINDS:
+        return {
+            "classification": "FRONTIER_RECONCILIATION_ALLOWED",
+            "reasons": [],
+            "certificate": None,
+        }
+    if action_kind in FRONTIER_TRANSPORT_ACTION_KINDS:
+        return {
+            "classification": "FRONTIER_TRANSPORT_ALLOWED",
+            "reasons": [],
+            "certificate": None,
+        }
+    reasons: list[str] = []
+    try:
+        key = _frontier_key(repository_id, lane_id)
+        record = state.get("records", {}).get(key)
+        if not isinstance(record, dict):
+            reasons.append("missing_frontier")
+            raise ProtocolError("missing frontier")
+        if record.get("disposition") not in FRONTIER_ADVANCE_DISPOSITIONS:
+            reasons.append(
+                "no_candidate"
+                if record.get("disposition") == "none"
+                else str(record.get("disposition") or "unresolved")
+            )
+            raise ProtocolError("frontier is not advanceable")
+        if not isinstance(authority_signal, dict):
+            reasons.append("authority_unverified")
+            raise ProtocolError("authority signal missing")
+        certificate = issue_frontier_certificate(
+            state, repository_id, lane_id, authority_signal
+        )
+        try:
+            validate_frontier_certificate(
+                certificate,
+                state,
+                authority_signal,
+                expected_artifact=expected_artifact,
+            )
+        except ProtocolError as exc:
+            historical_opt_in = (
+                isinstance(expected_artifact, dict)
+                and expected_artifact.get("historical_review") is True
+                and action_kind == "present_user_card"
+            )
+            required_history_fields = (
+                "artifact_id",
+                "artifact_revision",
+                "artifact_sha256",
+            )
+            historical = next(
+                (
+                    copy.deepcopy(item)
+                    for item in state.get("retired_artifacts", [])
+                    if historical_opt_in
+                    and isinstance(item, dict)
+                    and item.get("repository_id") == repository_id
+                    and item.get("lane_id") == lane_id
+                    and all(
+                        expected_artifact.get(field) is not None
+                        and item.get(field) == expected_artifact.get(field)
+                        for field in required_history_fields
+                    )
+                ),
+                None,
+            )
+            if "historical" in str(exc) and isinstance(historical, dict):
+                return {
+                    "classification": "FRONTIER_HISTORICAL_REVIEW_ALLOWED",
+                    "reasons": [],
+                    "certificate": certificate,
+                    "historical_artifact": historical,
+                }
+            raise
+    except ProtocolError as exc:
+        if "historical" in str(exc) and "historical" not in reasons:
+            reasons.append("historical")
+        elif not reasons:
+            reasons.append(str(exc))
+        return {
+            "classification": "FRONTIER_RECONCILIATION_REQUIRED",
+            "reasons": reasons,
+            "certificate": None,
+        }
+    return {
+        "classification": "FRONTIER_CERTIFIED",
+        "reasons": [],
+        "certificate": certificate,
+    }
 
 
 def _normalized_absolute_path(path: Path | str) -> str:
@@ -853,6 +1494,145 @@ PORTFOLIO_ACTIVE_ROUTE_FIELDS = (
 )
 
 
+def portfolio_semantic_fingerprint(portfolio: dict[str, Any]) -> str:
+    semantic = copy.deepcopy(portfolio)
+    semantic.pop("semantic_fingerprint", None)
+    for field in ("generated_at", "observed_at", "rendered_at"):
+        semantic.pop(field, None)
+    return canonical_json_hash(semantic)
+
+
+def migrate_portfolio_to_frontier_v3(
+    portfolio: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    if portfolio.get("schema_version") == FRONTIER_PORTFOLIO_VERSION:
+        migrated = copy.deepcopy(portfolio)
+    else:
+        validate_portfolio_status(portfolio)
+        migrated = copy.deepcopy(portfolio)
+        migrated["schema_version"] = FRONTIER_PORTFOLIO_VERSION
+    validate_frontier_state(frontier_state)
+    signal_by_repository = {
+        str(item.get("repository_id") or ""): item
+        for item in authority_signals
+        if isinstance(item, dict) and item.get("repository_id")
+    }
+    migrated["frontier_revision"] = frontier_state["revision"]
+    migrated["frontier_safety_mode"] = frontier_state["safety_mode"]
+    for row in migrated.get("repositories", []):
+        if not isinstance(row, dict):
+            continue
+        repository_id = str(row.get("repository_id") or "")
+        matches = [
+            record
+            for record in frontier_state.get("records", {}).values()
+            if isinstance(record, dict)
+            and record.get("repository_id") == repository_id
+        ]
+        record = max(
+            matches,
+            key=lambda item: int(item.get("frontier_epoch", 0)),
+            default=None,
+        )
+        signal = signal_by_repository.get(repository_id)
+        certificate = None
+        if isinstance(record, dict) and isinstance(signal, dict):
+            try:
+                certificate = issue_frontier_certificate(
+                    frontier_state,
+                    repository_id,
+                    str(record["lane_id"]),
+                    signal,
+                )
+            except ProtocolError:
+                certificate = None
+        if certificate is not None:
+            row["frontier_status"] = "verified"
+            row["frontier_certificate"] = certificate
+            row["frontier_epoch"] = record["frontier_epoch"]
+            row["frontier_disposition"] = record["disposition"]
+            row["active_artifact"] = {
+                "artifact_id": record.get("artifact_id"),
+                "artifact_revision": record.get("artifact_revision"),
+                "artifact_sha256": record.get("artifact_sha256"),
+            }
+        else:
+            repository_status = str(
+                frontier_state.get("repository_status", {}).get(
+                    repository_id, "reconciliation_required"
+                )
+            )
+            row["frontier_status"] = (
+                repository_status
+                if repository_status in {
+                    "legacy_unverified",
+                    "reconciliation_required",
+                }
+                else "reconciliation_required"
+            )
+            row["frontier_certificate"] = None
+            row["frontier_epoch"] = (
+                record.get("frontier_epoch") if isinstance(record, dict) else None
+            )
+            row["frontier_disposition"] = (
+                record.get("disposition") if isinstance(record, dict) else None
+            )
+            row["active_artifact"] = None
+    migrated["semantic_fingerprint"] = portfolio_semantic_fingerprint(migrated)
+    validate_portfolio_status(migrated)
+    return migrated
+
+
+def validate_portfolio_frontier_consistency(
+    portfolio: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+) -> None:
+    validate_portfolio_status(portfolio)
+    validate_frontier_state(frontier_state)
+    if portfolio.get("schema_version") != FRONTIER_PORTFOLIO_VERSION:
+        raise ProtocolError("portfolio frontier projection requires schema_version 3")
+    if portfolio.get("frontier_revision") != frontier_state.get("revision"):
+        raise ProtocolError("portfolio frontier revision is stale")
+    if portfolio.get("frontier_safety_mode") != frontier_state.get("safety_mode"):
+        raise ProtocolError("portfolio frontier safety mode is stale")
+    signal_by_repository = {
+        str(item.get("repository_id") or ""): item
+        for item in authority_signals
+        if isinstance(item, dict) and item.get("repository_id")
+    }
+    for row in portfolio.get("repositories", []):
+        repository_id = str(row.get("repository_id") or "")
+        certificate = row.get("frontier_certificate")
+        status = str(row.get("frontier_status") or "")
+        if certificate is None:
+            if status not in {"legacy_unverified", "reconciliation_required"}:
+                raise ProtocolError(
+                    f"portfolio frontier {repository_id} lacks a certificate"
+                )
+            continue
+        signal = signal_by_repository.get(repository_id)
+        if not isinstance(signal, dict):
+            raise ProtocolError(
+                f"portfolio frontier {repository_id} lacks authority signal"
+            )
+        validate_frontier_certificate(certificate, frontier_state, signal)
+        if status != "verified":
+            raise ProtocolError(
+                f"portfolio frontier {repository_id} certificate is not verified"
+            )
+        if row.get("frontier_epoch") != certificate.get("frontier_epoch"):
+            raise ProtocolError(
+                f"portfolio frontier {repository_id} epoch is stale"
+            )
+        if row.get("frontier_disposition") != certificate.get("disposition"):
+            raise ProtocolError(
+                f"portfolio frontier {repository_id} disposition is stale"
+            )
+
+
 def _normalize_portfolio_active_route(
     route: Any, *, label: str
 ) -> dict[str, Any]:
@@ -882,12 +1662,31 @@ def _normalize_portfolio_active_route(
 
 
 def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
-    if portfolio.get("schema_version") != 2:
-        raise ProtocolError("portfolio status schema_version must be 2")
+    version = portfolio.get("schema_version")
+    if version not in {2, FRONTIER_PORTFOLIO_VERSION}:
+        raise ProtocolError("portfolio status schema_version must be 2 or 3")
     if not re.fullmatch(
         r"[0-9a-fA-F]{64}", str(portfolio.get("semantic_fingerprint") or "")
     ):
         raise ProtocolError("portfolio semantic_fingerprint must be SHA-256")
+    if version == FRONTIER_PORTFOLIO_VERSION:
+        if portfolio.get("semantic_fingerprint") != portfolio_semantic_fingerprint(
+            portfolio
+        ):
+            raise ProtocolError(
+                "portfolio semantic_fingerprint does not match content"
+            )
+        if not isinstance(portfolio.get("frontier_revision"), int) or portfolio[
+            "frontier_revision"
+        ] < 0:
+            raise ProtocolError(
+                "portfolio frontier_revision must be non-negative"
+            )
+        if portfolio.get("frontier_safety_mode") not in {
+            FRONTIER_SAFETY_MODE,
+            "FRONTIER_VERIFIED",
+        }:
+            raise ProtocolError("portfolio frontier_safety_mode is invalid")
     if portfolio.get("coordinator_availability") != "AVAILABLE":
         raise ProtocolError("portfolio coordinator_availability must be AVAILABLE")
     if portfolio.get("execution_state") not in {
@@ -974,6 +1773,19 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
         if not repository_id or repository_id in seen:
             raise ProtocolError("portfolio repository_id must be unique and non-empty")
         seen.add(repository_id)
+        if version == FRONTIER_PORTFOLIO_VERSION:
+            if row.get("frontier_status") not in {
+                "verified",
+                "legacy_unverified",
+                "reconciliation_required",
+            }:
+                raise ProtocolError("portfolio frontier_status is invalid")
+            if row.get("frontier_certificate") is not None and not isinstance(
+                row.get("frontier_certificate"), dict
+            ):
+                raise ProtocolError(
+                    "portfolio frontier_certificate must be object or null"
+                )
         if row.get("state") not in PORTFOLIO_PROJECT_STATES:
             raise ProtocolError(f"invalid portfolio project state: {row.get('state')}")
         progress = row.get("progress")
@@ -2066,6 +2878,8 @@ def select_next_actionable_repository(
     coordinator_state: dict[str, Any],
     *,
     excluded_repository_ids: Iterable[str] = (),
+    frontier_state: dict[str, Any] | None = None,
+    authority_signals: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     current_host = host_by_alias(
         hosts, str(adapter.get("current_host_alias") or "local")
@@ -2079,6 +2893,23 @@ def select_next_actionable_repository(
     host_id = str(current_host["host_id"])
     mission_list = [item for item in missions if isinstance(item, dict)]
     excluded = {str(item) for item in excluded_repository_ids}
+    frontier_view = (
+        migrate_frontier_state(
+            frontier_state,
+            (
+                str(item.get("repository_id") or "")
+                for item in registry.get("repositories", [])
+                if isinstance(item, dict)
+            ),
+        )
+        if frontier_state is not None
+        else None
+    )
+    frontier_signals = {
+        str(item.get("repository_id") or ""): item
+        for item in authority_signals
+        if isinstance(item, dict) and item.get("repository_id")
+    }
     pending_response_keys = {
         (
             str(item.get("repository_id") or ""),
@@ -2201,6 +3032,7 @@ def select_next_actionable_repository(
             if item.get("repository_id") == repository_id
             and is_actionable_mission(item)
         ]
+        selected_mission: dict[str, Any] | None = None
         if repo_missions:
             ranked = sorted(
                 (
@@ -2245,6 +3077,26 @@ def select_next_actionable_repository(
             )
         else:
             continue
+        if frontier_view is not None:
+            action_kind = _selection_action_kind(
+                {"selection_reason": reason}
+            )
+            expected_artifact = (
+                copy.deepcopy(selected_mission.get("active_artifact"))
+                if isinstance(selected_mission, dict)
+                and isinstance(selected_mission.get("active_artifact"), dict)
+                else None
+            )
+            frontier_decision = frontier_gate_decision(
+                frontier_view,
+                repository_id,
+                selected_lane,
+                action_kind=action_kind,
+                expected_artifact=expected_artifact,
+                authority_signal=frontier_signals.get(repository_id),
+            )
+            if frontier_decision["classification"] != "FRONTIER_CERTIFIED":
+                continue
         stable_order = int(repository.get("stable_order", registry_index))
         candidates.append(
             (
@@ -2398,17 +3250,25 @@ def acknowledge_coordinator_event_routed(
     if len(matches) != 1:
         raise ProtocolError("exact queued Coordinator event is required")
     event = matches[0]
-    event["state"] = "routed"
+    if event.get("state") == "delivery_acknowledged":
+        if event.get("recipient_thread_id") != recipient_thread_id:
+            raise ProtocolError("conflicting Coordinator event delivery replay")
+        return {
+            "classification": "COORDINATOR_EVENT_DELIVERY_ALREADY_ACKNOWLEDGED",
+            "event_id": event_id,
+            "recipient_thread_id": recipient_thread_id,
+            "semantic_result_applied": False,
+            "deduplicated": True,
+        }
+    event["state"] = "delivery_acknowledged"
     event["recipient_thread_id"] = recipient_thread_id
-    event["routed_at"] = utc_now()
-    coordinator_state["pending_user_events"] = [
-        item for item in pending if item is not event
-    ]
-    coordinator_state.setdefault("routed_user_events", []).append(event)
+    event["delivery_acknowledged_at"] = utc_now()
     return {
-        "classification": "COORDINATOR_EVENT_ROUTED",
+        "classification": "COORDINATOR_EVENT_DELIVERY_ACKNOWLEDGED",
         "event_id": event_id,
         "recipient_thread_id": recipient_thread_id,
+        "semantic_result_applied": False,
+        "deduplicated": False,
     }
 
 
@@ -2724,6 +3584,25 @@ def _record_with_route_metadata(record: dict[str, Any]) -> dict[str, Any]:
         observer_kind = _action_observer_kind(action)
         if observer_kind in ROUTE_OBSERVER_KINDS:
             result.setdefault("observer_kind", observer_kind)
+        if action.get("requires_external_result") is True:
+            status = str(result.get("status") or "claimed")
+            lifecycle_state = (
+                "dispatched" if status in {"sent", "waiting"} else "created"
+            )
+            result.setdefault("external_lifecycle_state", lifecycle_state)
+            result.setdefault(
+                "external_lifecycle_history",
+                [
+                    {
+                        "state": lifecycle_state,
+                        "at": str(
+                            result.get("sent_at")
+                            or result.get("claimed_at")
+                            or "legacy-v2"
+                        ),
+                    }
+                ],
+            )
     return result
 
 
@@ -2844,6 +3723,25 @@ def migrate_scheduler_state(state: dict[str, Any]) -> dict[str, Any]:
                 _record_with_route_metadata(item)
                 for item in migrated["route_leases"]
             ]
+        if not all(
+            isinstance(item, dict)
+            for item in migrated.get("completed_actions", [])
+        ):
+            raise ProtocolError("completed_actions must contain objects")
+        for item in migrated.get("completed_actions", []):
+            if item.get("requires_external_result") is True:
+                item.setdefault(
+                    "external_lifecycle_state", "legacy_unverified"
+                )
+                item.setdefault(
+                    "external_lifecycle_history",
+                    [
+                        {
+                            "state": "legacy_unverified",
+                            "at": str(item.get("completed_at") or "legacy-v2"),
+                        }
+                    ],
+                )
         migrated.setdefault(
             "round_robin_cursor_repository_id",
             _infer_round_robin_cursor_repository_id(migrated),
@@ -2889,6 +3787,18 @@ def migrate_scheduler_state(state: dict[str, Any]) -> dict[str, Any]:
     migrated["round_robin_cursor_repository_id"] = (
         _infer_round_robin_cursor_repository_id(migrated)
     )
+    for item in migrated.get("completed_actions", []):
+        if isinstance(item, dict) and item.get("requires_external_result") is True:
+            item.setdefault("external_lifecycle_state", "legacy_unverified")
+            item.setdefault(
+                "external_lifecycle_history",
+                [
+                    {
+                        "state": "legacy_unverified",
+                        "at": str(item.get("completed_at") or "legacy-v1"),
+                    }
+                ],
+            )
     _sync_legacy_active_claim_view(migrated)
     _validate_scheduler_state_v2(migrated)
     return migrated
@@ -2928,6 +3838,22 @@ def _validate_scheduler_record(
     status = str(item.get("status") or "claimed")
     if status not in allowed_statuses:
         raise ProtocolError(f"{label} has invalid status")
+    if action.get("requires_external_result") is True:
+        lifecycle_state = item.get("external_lifecycle_state")
+        if lifecycle_state not in EXTERNAL_RESULT_LIFECYCLE_STATES:
+            raise ProtocolError(f"{label} has invalid external lifecycle state")
+        history = item.get("external_lifecycle_history")
+        if not isinstance(history, list) or not history:
+            raise ProtocolError(f"{label} requires external lifecycle history")
+        if any(
+            not isinstance(entry, dict)
+            or entry.get("state") not in EXTERNAL_RESULT_LIFECYCLE_STATES
+            or not str(entry.get("at") or "")
+            for entry in history
+        ):
+            raise ProtocolError(f"{label} external lifecycle history is invalid")
+        if history[-1].get("state") != lifecycle_state:
+            raise ProtocolError(f"{label} lifecycle history is not current")
     if status in {"prepared", "sent", "waiting"}:
         if action.get("requires_external_result") is not True:
             raise ProtocolError(f"{label} must reference an external action")
@@ -3035,9 +3961,29 @@ def _validate_scheduler_state_v2(state: dict[str, Any]) -> None:
                     raise ProtocolError(
                         f"completed_actions[{index}] requires {field}"
                     )
-            if not str(item.get("evidence") or "").strip():
+            lifecycle_state = item.get("external_lifecycle_state")
+            if lifecycle_state not in (
+                EXTERNAL_RESULT_LIFECYCLE_STATES
+                | EXTERNAL_RESULT_COMPATIBILITY_STATES
+            ):
                 raise ProtocolError(
-                    f"completed_actions[{index}] requires result evidence"
+                    f"completed_actions[{index}] has invalid external lifecycle state"
+                )
+            if lifecycle_state == "result_applied":
+                evidence = item.get("evidence")
+                authorized_runtime_result = item.get("kind") in (
+                    AUTHORIZED_RUNTIME_ACTION_KINDS
+                )
+                if not authorized_runtime_result and (
+                    not isinstance(evidence, dict)
+                    or not str(evidence.get("result_id") or "")
+                ):
+                    raise ProtocolError(
+                        f"completed_actions[{index}] requires structured result evidence"
+                    )
+            elif not str(item.get("evidence") or "").strip():
+                raise ProtocolError(
+                    f"completed_actions[{index}] requires legacy result evidence"
                 )
         completed_seen.add(action_id)
 
@@ -3049,12 +3995,161 @@ def validate_scheduler_state(state: dict[str, Any]) -> None:
     _validate_scheduler_state_v2(state)
 
 
+def _git_observe(root: Path, *arguments: str) -> tuple[int, str, str]:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, "", str(exc)
+    return completed.returncode, completed.stdout.strip(), completed.stderr.strip()
+
+
+def _repository_git_high_water(root: Path) -> dict[str, Any]:
+    if not (root / ".git").exists():
+        return {
+            "status": "not_repository",
+            "branch": None,
+            "head_sha": None,
+            "dirty": None,
+            "dirty_paths": [],
+            "error": None,
+        }
+    inside_code, inside, inside_error = _git_observe(
+        root, "rev-parse", "--is-inside-work-tree"
+    )
+    if inside_code != 0 or inside.casefold() != "true":
+        return {
+            "status": "not_repository",
+            "branch": None,
+            "head_sha": None,
+            "dirty": None,
+            "dirty_paths": [],
+            "error": inside_error or None,
+        }
+    _, branch, _ = _git_observe(root, "branch", "--show-current")
+    head_code, head_sha, head_error = _git_observe(root, "rev-parse", "HEAD")
+    _, remote, _ = _git_observe(root, "remote", "get-url", "origin")
+    _, status_text, _ = _git_observe(
+        root, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    dirty_lines = [line for line in status_text.splitlines() if line]
+    dirty_paths = sorted(
+        {
+            line[3:].split(" -> ")[-1]
+            for line in dirty_lines
+            if len(line) > 3
+        }
+    )
+    upstream_code, upstream, _ = _git_observe(
+        root, "rev-parse", "--abbrev-ref", "@{u}"
+    )
+    ahead = behind = None
+    if upstream_code == 0 and upstream:
+        parity_code, parity, _ = _git_observe(
+            root, "rev-list", "--left-right", "--count", f"HEAD...{upstream}"
+        )
+        if parity_code == 0:
+            parts = parity.split()
+            if len(parts) == 2 and all(part.isdigit() for part in parts):
+                ahead, behind = (int(parts[0]), int(parts[1]))
+    _, commit_time, _ = _git_observe(root, "show", "-s", "--format=%cI", "HEAD")
+    _, commit_count, _ = _git_observe(root, "rev-list", "--count", "HEAD")
+    operation = "none"
+    for marker, name in (
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ):
+        marker_code, marker_path, _ = _git_observe(
+            root, "rev-parse", "--git-path", marker
+        )
+        observed_marker = Path(marker_path)
+        if not observed_marker.is_absolute():
+            observed_marker = root / observed_marker
+        if marker_code == 0 and marker_path and observed_marker.is_file():
+            operation = name
+            break
+        if marker_code == 0 and marker_path and observed_marker.is_dir():
+            operation = name
+            break
+    return {
+        "status": "present" if head_code == 0 else "unborn",
+        "branch": branch or None,
+        "head_sha": head_sha.lower() if head_code == 0 else None,
+        "head_commit_time": commit_time or None,
+        "commit_count": int(commit_count) if commit_count.isdigit() else None,
+        "remote_origin": remote or None,
+        "upstream": upstream if upstream_code == 0 and upstream else None,
+        "ahead": ahead,
+        "behind": behind,
+        "dirty": bool(dirty_lines),
+        "dirty_paths": dirty_paths,
+        "operation": operation,
+        "error": head_error or None,
+    }
+
+
+def _authority_file_high_water(root: Path, relative_path: Path) -> dict[str, Any]:
+    portable = relative_path.as_posix()
+    candidate = root / relative_path
+    if not (root / ".git").exists():
+        return {
+            "path": portable,
+            "exists": candidate.is_file(),
+            "modified_time_ns": (
+                candidate.stat().st_mtime_ns if candidate.is_file() else None
+            ),
+            "is_dirty": None,
+            "git_blob_sha": None,
+            "last_commit_sha": None,
+            "last_commit_time": None,
+        }
+    status_code, status_text, _ = _git_observe(
+        root, "status", "--porcelain=v1", "--", portable
+    )
+    log_code, log_text, _ = _git_observe(
+        root, "log", "-1", "--format=%H%x09%cI", "--", portable
+    )
+    stage_code, stage_text, _ = _git_observe(
+        root, "ls-files", "--stage", "--", portable
+    )
+    last_commit_sha = last_commit_time = None
+    if log_code == 0 and log_text:
+        log_parts = log_text.split("\t", 1)
+        last_commit_sha = log_parts[0].lower()
+        last_commit_time = log_parts[1] if len(log_parts) == 2 else None
+    git_blob_sha = None
+    if stage_code == 0 and stage_text:
+        stage_parts = stage_text.split()
+        if len(stage_parts) >= 2:
+            git_blob_sha = stage_parts[1].lower()
+    return {
+        "path": portable,
+        "exists": candidate.is_file(),
+        "modified_time_ns": candidate.stat().st_mtime_ns if candidate.is_file() else None,
+        "is_dirty": bool(status_text) if status_code == 0 else None,
+        "git_blob_sha": git_blob_sha,
+        "last_commit_sha": last_commit_sha,
+        "last_commit_time": last_commit_time,
+    }
+
+
 def collect_authority_signals(
     registry: dict[str, Any],
     hosts: dict[str, Any],
     adapter: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Hash only explicitly registered repository authority files."""
+    """Collect registered authority plus repository/file high-water marks."""
     current_host = host_by_alias(
         hosts, str(adapter.get("current_host_alias") or "local")
     )
@@ -3069,11 +4164,12 @@ def collect_authority_signals(
             continue
         repository_id = str(repository.get("repository_id") or "")
         configured = repository.get("authority_watch", [])
-        if not repository_id or not isinstance(configured, list) or not configured:
+        if not repository_id or not isinstance(configured, list):
             continue
         root_value = roots.get(repository_id)
         root = Path(str(root_value)).resolve() if root_value else None
         sources: list[dict[str, Any]] = []
+        high_water_marks: list[dict[str, Any]] = []
         for raw in configured:
             if isinstance(raw, str):
                 relative = raw
@@ -3119,11 +4215,27 @@ def collect_authority_signals(
                     )
                 else:
                     source["status"] = "missing"
+                high_water_marks.append(
+                    _authority_file_high_water(root, relative_path)
+                )
             sources.append(source)
         signal_payload = {
             "repository_id": repository_id,
             "root": str(root) if root is not None else None,
             "sources": sources,
+            "authority_watch_configured": bool(configured),
+            "git": (
+                _repository_git_high_water(root)
+                if root is not None and root.is_dir()
+                else {
+                    "status": "root_unavailable",
+                    "branch": None,
+                    "head_sha": None,
+                    "dirty": None,
+                    "dirty_paths": [],
+                }
+            ),
+            "high_water_marks": high_water_marks,
         }
         signal_payload["authority_fingerprint"] = canonical_json_hash(
             signal_payload
@@ -4305,6 +5417,74 @@ def _authorized_runtime_candidates(
     return candidates, active_repositories
 
 
+def _frontier_action_context(
+    action: dict[str, Any],
+    registry: dict[str, Any],
+    missions: Iterable[dict[str, Any]],
+) -> tuple[str, str, dict[str, Any] | None]:
+    repository_id = _action_repository_id(action)
+    route = action.get("payload", {}).get("route", {})
+    lane = str(route.get("supervision_lane") or "") if isinstance(route, dict) else ""
+    if not lane:
+        lane = next(
+            (
+                str(item.get("default_supervision_lane") or "default")
+                for item in registry.get("repositories", [])
+                if isinstance(item, dict)
+                and item.get("repository_id") == repository_id
+            ),
+            "default",
+        )
+    selection = action.get("payload", {}).get("selection", {})
+    selection = selection if isinstance(selection, dict) else {}
+    mission_id = selection.get("mission_id")
+    attempt_id = selection.get("attempt_id")
+    mission = next(
+        (
+            item
+            for item in missions
+            if isinstance(item, dict)
+            and item.get("repository_id") == repository_id
+            and (mission_id is None or item.get("mission_id") == mission_id)
+            and (
+                attempt_id is None
+                or str(item.get("attempt_id") or "") == str(attempt_id or "")
+            )
+        ),
+        None,
+    )
+    expected_artifact = None
+    if isinstance(mission, dict) and isinstance(mission.get("active_artifact"), dict):
+        expected_artifact = copy.deepcopy(mission["active_artifact"])
+    card = action.get("payload", {}).get("card")
+    if isinstance(card, dict):
+        artifact = card.get("artifact") or card.get("related_artifact")
+        if isinstance(artifact, dict):
+            expected_artifact = copy.deepcopy(artifact)
+        elif isinstance(artifact, str) and artifact:
+            expected_artifact = {"artifact_id": artifact}
+        if (
+            card.get("historical_review") is True
+            and isinstance(expected_artifact, dict)
+        ):
+            expected_artifact["historical_review"] = True
+    return repository_id, lane, expected_artifact
+
+
+def _bind_frontier_certificate_to_action(
+    action: dict[str, Any], certificate: dict[str, Any]
+) -> dict[str, Any]:
+    bound = copy.deepcopy(action)
+    payload = bound.setdefault("payload", {})
+    payload["frontier_certificate"] = copy.deepcopy(certificate)
+    identity = {
+        "kind": bound["kind"],
+        "payload": _semantic_scheduler_value(payload),
+    }
+    bound["action_id"] = canonical_json_hash(identity)[:32]
+    return bound
+
+
 def build_coordinator_plan(
     registry: dict[str, Any],
     hosts: dict[str, Any],
@@ -4314,6 +5494,7 @@ def build_coordinator_plan(
     scheduler_state: dict[str, Any],
     *,
     authority_signals: Iterable[dict[str, Any]] | None = None,
+    frontier_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the one deterministic plan shared by status and recovery."""
     _ensure_scheduler_state_v2(scheduler_state)
@@ -4334,6 +5515,11 @@ def build_coordinator_plan(
         for index, item in enumerate(registry.get("repositories", []))
         if isinstance(item, dict) and item.get("repository_id")
     }
+    frontier_view = (
+        migrate_frontier_state(frontier_state, repository_order)
+        if frontier_state is not None
+        else None
+    )
     repository_fingerprints = {
         repository_id: _repository_scheduler_fingerprint(
             repository_id,
@@ -4355,6 +5541,11 @@ def build_coordinator_plan(
             "pending_repository_ids": coordinator_state.get(
                 "pending_repository_ids", []
             ),
+            "frontier": (
+                _semantic_scheduler_value(frontier_view)
+                if frontier_view is not None
+                else None
+            ),
         }
     )
     completed_ids = {
@@ -4363,6 +5554,67 @@ def build_coordinator_plan(
         if isinstance(item, dict)
     }
     candidates: list[dict[str, Any]] = []
+    frontier_gate_report: list[dict[str, Any]] = []
+    if frontier_view is not None:
+        lane_by_repository: dict[str, set[str]] = {
+            repository_id: {
+                next(
+                    (
+                        str(item.get("default_supervision_lane") or "default")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                        and item.get("repository_id") == repository_id
+                    ),
+                    "default",
+                )
+            }
+            for repository_id in repository_order
+        }
+        for mission in mission_list:
+            repository_id = str(mission.get("repository_id") or "")
+            if repository_id in lane_by_repository:
+                lane_by_repository[repository_id].add(
+                    str(mission.get("supervision_lane") or "default")
+                )
+        for repository_id, lanes in lane_by_repository.items():
+            for lane in sorted(lanes):
+                decision = frontier_gate_decision(
+                    frontier_view,
+                    repository_id,
+                    lane,
+                    action_kind="advance_mission",
+                    expected_artifact=None,
+                    authority_signal=signal_by_repository.get(repository_id),
+                )
+                frontier_gate_report.append(
+                    {
+                        "repository_id": repository_id,
+                        "lane_id": lane,
+                        **copy.deepcopy(decision),
+                    }
+                )
+                if decision["classification"] != "FRONTIER_CERTIFIED":
+                    action = _scheduler_action(
+                        "reconcile_repository_frontier",
+                        {
+                            "repository_id": repository_id,
+                            "lane_id": lane,
+                            "reasons": decision["reasons"],
+                            "authority_signal": signal_by_repository.get(
+                                repository_id
+                            ),
+                            "current_record": copy.deepcopy(
+                                frontier_view.get("records", {}).get(
+                                    _frontier_key(repository_id, lane)
+                                )
+                            ),
+                            "safety_mode": frontier_view["safety_mode"],
+                        },
+                        priority=5,
+                        stable_order=repository_order[repository_id],
+                    )
+                    if action["action_id"] not in completed_ids:
+                        candidates.append(action)
     runtime_candidates, runtime_action_repositories = (
         _authorized_runtime_candidates(
             coordinator_state,
@@ -4532,7 +5784,9 @@ def build_coordinator_plan(
                     candidates.append(action)
 
         authority_signal = signal_by_repository.get(repository_id)
-        if authority_signal is not None:
+        if authority_signal is not None and authority_signal.get(
+            "authority_watch_configured"
+        ) is not False:
             action = _scheduler_action(
                 "reconcile_repository_authority",
                 {
@@ -4554,6 +5808,8 @@ def build_coordinator_plan(
             mission_list,
             coordinator_state,
             excluded_repository_ids=excluded,
+            frontier_state=frontier_view,
+            authority_signals=signals,
         )
         if selection.get("classification") != "NEXT_ACTIONABLE_REPOSITORY_SELECTED":
             break
@@ -4640,6 +5896,78 @@ def build_coordinator_plan(
         if action["action_id"] in completed_ids:
             continue
         candidates.append(action)
+
+    if frontier_view is not None:
+        gated_candidates: list[dict[str, Any]] = []
+        for action in candidates:
+            repository_id, lane, expected_artifact = _frontier_action_context(
+                action, registry, mission_list
+            )
+            if not repository_id:
+                gated_candidates.append(action)
+                continue
+            decision = frontier_gate_decision(
+                frontier_view,
+                repository_id,
+                lane,
+                action_kind=str(action.get("kind") or ""),
+                expected_artifact=expected_artifact,
+                authority_signal=signal_by_repository.get(repository_id),
+            )
+            if decision["classification"] in {
+                "FRONTIER_RECONCILIATION_ALLOWED",
+                "FRONTIER_TRANSPORT_ALLOWED",
+            }:
+                gated_candidates.append(action)
+            elif decision["classification"] in {
+                "FRONTIER_CERTIFIED",
+                "FRONTIER_HISTORICAL_REVIEW_ALLOWED",
+            }:
+                selection = action.get("payload", {}).get("selection", {})
+                selection = selection if isinstance(selection, dict) else {}
+                selected = next(
+                    (
+                        item
+                        for item in mission_list
+                        if item.get("repository_id") == repository_id
+                        and item.get("mission_id") == selection.get("mission_id")
+                        and str(item.get("attempt_id") or "")
+                        == str(selection.get("attempt_id") or "")
+                    ),
+                    None,
+                )
+                if isinstance(selected, dict) and selected.get("value_contract") is not None:
+                    try:
+                        validate_mission_value_contract_frontier(
+                            selected["value_contract"], decision["certificate"]
+                        )
+                    except ProtocolError as exc:
+                        frontier_gate_report.append(
+                            {
+                                "repository_id": repository_id,
+                                "lane_id": lane,
+                                "action_kind": action.get("kind"),
+                                "classification": "FRONTIER_RECONCILIATION_REQUIRED",
+                                "reasons": [str(exc)],
+                                "certificate": None,
+                            }
+                        )
+                        continue
+                gated_candidates.append(
+                    _bind_frontier_certificate_to_action(
+                        action, decision["certificate"]
+                    )
+                )
+            else:
+                frontier_gate_report.append(
+                    {
+                        "repository_id": repository_id,
+                        "lane_id": lane,
+                        "action_kind": action.get("kind"),
+                        **copy.deepcopy(decision),
+                    }
+                )
+        candidates = gated_candidates
 
     round_robin_cursor = scheduler_state.get(
         "round_robin_cursor_repository_id"
@@ -4989,6 +6317,17 @@ def build_coordinator_plan(
             "concurrency_limit": concurrency_limit,
             "capacity_remaining": capacity_remaining,
             "round_robin_cursor_repository_id": round_robin_cursor,
+            "frontier_revision": (
+                frontier_view.get("revision")
+                if frontier_view is not None
+                else None
+            ),
+            "frontier_safety_mode": (
+                frontier_view.get("safety_mode")
+                if frontier_view is not None
+                else None
+            ),
+            "frontier_gate": frontier_gate_report,
             "ready_actions": ready_actions,
             "required_handoff_actions": required_handoff_actions,
             "protocol_handoff_required": bool(required_handoff_actions),
@@ -5850,6 +7189,71 @@ def _bind_or_validate_scheduler_record_owner(
     return actor
 
 
+def _set_external_lifecycle(
+    record: dict[str, Any],
+    lifecycle_state: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> None:
+    if lifecycle_state not in EXTERNAL_RESULT_LIFECYCLE_STATES:
+        raise ProtocolError("invalid external result lifecycle state")
+    if record.get("action", {}).get("requires_external_result") is not True:
+        raise ProtocolError("external lifecycle requires an external action")
+    current = str(record.get("external_lifecycle_state") or "created")
+    if current == lifecycle_state:
+        return
+    terminal = {
+        "result_applied",
+        "failed",
+        "stale_result_quarantined",
+        "cancelled",
+    }
+    if current in terminal:
+        raise ProtocolError("external result lifecycle is already terminal")
+    transitions = {
+        "created": {"dispatched", "cancelled", "failed"},
+        "dispatched": {
+            "delivery_acknowledged",
+            "result_received",
+            "failed",
+            "cancelled",
+        },
+        "delivery_acknowledged": {
+            "result_received",
+            "failed",
+            "cancelled",
+        },
+        "result_received": {
+            "result_parsed",
+            "failed",
+            "stale_result_quarantined",
+        },
+        "result_parsed": {
+            "result_validated",
+            "failed",
+            "stale_result_quarantined",
+        },
+        "result_validated": {
+            "result_applied",
+            "failed",
+            "stale_result_quarantined",
+        },
+    }
+    if lifecycle_state not in transitions.get(current, set()):
+        raise ProtocolError(
+            f"external lifecycle {current} cannot transition to {lifecycle_state}"
+        )
+    entry = {"state": lifecycle_state, "at": utc_now()}
+    if details:
+        entry["details"] = copy.deepcopy(details)
+    history = record.setdefault(
+        "external_lifecycle_history",
+        [{"state": current, "at": str(record.get("claimed_at") or "legacy-v2")}],
+    )
+    history.append(entry)
+    record["external_lifecycle_state"] = lifecycle_state
+
+
 def claim_coordinator_action(
     scheduler_state: dict[str, Any],
     plan: dict[str, Any],
@@ -6112,6 +7516,15 @@ def mark_coordinator_action_sent(
             "leased_at": utc_now(),
         }
     )
+    _set_external_lifecycle(
+        record,
+        "dispatched",
+        details={
+            "recipient_thread_id": recipient_thread_id,
+            "packet_sha256": packet_sha256.lower(),
+            "after_cursor": after_cursor,
+        },
+    )
     leases.append(record)
     repository_id = str(record.get("repository_id") or "")
     if repository_id:
@@ -6127,6 +7540,52 @@ def mark_coordinator_action_sent(
         "route_lease_created": True,
         "capacity_remaining": int(scheduler_state["concurrency_limit"])
         - len(leases),
+        "deduplicated": False,
+    }
+
+
+def acknowledge_coordinator_action_delivery(
+    scheduler_state: dict[str, Any],
+    action_id: str,
+    delivery_ack_id: str,
+    *,
+    actor_task_id: str | None = None,
+) -> dict[str, Any]:
+    """Record transport acknowledgement without closing semantic work."""
+    _ensure_scheduler_state_v2(scheduler_state)
+    lease_index = _route_lease_index(scheduler_state, action_id)
+    if lease_index is None:
+        raise ProtocolError("delivery acknowledgement requires an exact route lease")
+    lease = scheduler_state["route_leases"][lease_index]
+    _bind_or_validate_scheduler_record_owner(lease, actor_task_id)
+    acknowledgement = str(delivery_ack_id or "").strip()
+    if not acknowledgement:
+        raise ProtocolError("delivery acknowledgement requires an exact receipt id")
+    existing = str(lease.get("delivery_ack_id") or "")
+    if existing:
+        if existing != acknowledgement:
+            raise ProtocolError("conflicting delivery acknowledgement replay")
+        return {
+            "classification": "COORDINATOR_DELIVERY_ALREADY_ACKNOWLEDGED",
+            "action_id": action_id,
+            "delivery_ack_id": acknowledgement,
+            "lifecycle_state": lease.get("external_lifecycle_state"),
+            "deduplicated": True,
+        }
+    _set_external_lifecycle(
+        lease,
+        "delivery_acknowledged",
+        details={"delivery_ack_id": acknowledgement},
+    )
+    lease["delivery_ack_id"] = acknowledgement
+    scheduler_state["revision"] = int(scheduler_state.get("revision", 0)) + 1
+    _sync_legacy_active_claim_view(scheduler_state)
+    return {
+        "classification": "COORDINATOR_DELIVERY_ACKNOWLEDGED",
+        "action_id": action_id,
+        "delivery_ack_id": acknowledgement,
+        "lifecycle_state": "delivery_acknowledged",
+        "semantic_result_applied": False,
         "deduplicated": False,
     }
 
@@ -6601,7 +8060,7 @@ def complete_coordinator_action(
     action_id: str,
     outcome: str,
     *,
-    evidence: str | None = None,
+    evidence: Any = None,
     coordinator_state: dict[str, Any] | None = None,
     actor_task_id: str | None = None,
 ) -> dict[str, Any]:
@@ -6626,8 +8085,7 @@ def complete_coordinator_action(
                 existing_completion, actor_task_id
             )
             if existing_completion.get("outcome") != outcome or (
-                str(existing_completion.get("evidence") or "")
-                != str(evidence or "")
+                existing_completion.get("evidence") != evidence
             ):
                 raise ProtocolError("conflicting completed action replay")
             completed_action = existing_completion.get("action")
@@ -6665,14 +8123,45 @@ def complete_coordinator_action(
                 "authorized runtime completion requires Coordinator state"
             )
         validate_coordinator_state(coordinator_state)
+    authorized_external_applied = False
+    if requires_external_result and action_kind in AUTHORIZED_RUNTIME_ACTION_KINDS:
+        _apply_authorized_runtime_completion(
+            coordinator_state or {}, active, action_id, outcome, evidence
+        )
+        for lifecycle_state in (
+            "result_received",
+            "result_parsed",
+            "result_validated",
+            "result_applied",
+        ):
+            _set_external_lifecycle(
+                active,
+                lifecycle_state,
+                details={
+                    "authorized_runtime_receipt": str(evidence or ""),
+                    "outcome": outcome,
+                },
+            )
+        authorized_external_applied = True
     if requires_external_result and source != "route_lease":
         raise ProtocolError(
             "external Coordinator action cannot complete before exact send receipt"
         )
-    if requires_external_result and not str(evidence or "").strip():
-        raise ProtocolError(
-            "external Coordinator action completion requires result evidence"
-        )
+    if requires_external_result:
+        if active.get("external_lifecycle_state") != "result_applied":
+            raise ProtocolError(
+                "external Coordinator action cannot complete before result_applied"
+            )
+        if (
+            action_kind not in AUTHORIZED_RUNTIME_ACTION_KINDS
+            and (
+                not isinstance(evidence, dict)
+                or not str(evidence.get("result_id") or "")
+            )
+        ):
+            raise ProtocolError(
+                "external Coordinator action completion requires structured result evidence"
+            )
     if action_kind in AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS:
         runtime_record = _runtime_action_from_scheduler_record(
             active, coordinator_state or {}
@@ -6703,7 +8192,7 @@ def complete_coordinator_action(
             raise ProtocolError(
                 "authorized runtime local effect must be prepared before completion"
             )
-    if coordinator_state is not None:
+    if coordinator_state is not None and not authorized_external_applied:
         _apply_authorized_runtime_completion(
             coordinator_state, active, action_id, outcome, evidence
         )
@@ -6726,6 +8215,10 @@ def complete_coordinator_action(
         "delivery_token": active.get("delivery_token"),
         "after_cursor": active.get("after_cursor"),
         "owner_task_id": active.get("owner_task_id"),
+        "external_lifecycle_state": active.get("external_lifecycle_state"),
+        "external_lifecycle_history": copy.deepcopy(
+            active.get("external_lifecycle_history")
+        ),
         "completed_at": utc_now(),
     }
     completed = [
@@ -6750,6 +8243,1062 @@ def complete_coordinator_action(
         "outcome": outcome,
         "closed": source,
         "deduplicated": False,
+    }
+
+
+def _external_result_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    event = result["frontier_event"]
+    return {
+        "result_id": result["result_id"],
+        "source_thread_id": result["source_thread_id"],
+        "source_turn_id": result["source_turn_id"],
+        "source_message_id": result["source_message_id"],
+        "disposition": result["disposition"],
+        "frontier_event_id": event["frontier_event_id"],
+        "frontier_epoch": event["frontier_epoch"],
+        "authority_fingerprint": result["authority_signal"][
+            "authority_fingerprint"
+        ],
+        "result_sha256": canonical_json_hash(result),
+    }
+
+
+def _close_terminal_external_route(
+    scheduler_state: dict[str, Any],
+    lease_index: int,
+    *,
+    outcome: str,
+    evidence: dict[str, Any],
+) -> None:
+    """Close a failed/quarantined external route without treating it as applied."""
+    lease = scheduler_state["route_leases"][lease_index]
+    lifecycle_state = str(lease.get("external_lifecycle_state") or "")
+    if lifecycle_state not in {
+        "failed",
+        "stale_result_quarantined",
+        "cancelled",
+    }:
+        raise ProtocolError("terminal external route requires a terminal lifecycle")
+    action = lease.get("action", {})
+    record = {
+        "action_id": lease.get("action_id"),
+        "kind": action.get("kind"),
+        "action": copy.deepcopy(action),
+        "requires_external_result": True,
+        "state_fingerprint": lease.get("state_fingerprint"),
+        "outcome": outcome,
+        "evidence": copy.deepcopy(evidence),
+        "repository_id": lease.get("repository_id"),
+        "route_class": lease.get("route_class"),
+        "recipient_thread_id": lease.get("recipient_thread_id"),
+        "packet_sha256": lease.get("packet_sha256"),
+        "delivery_token": lease.get("delivery_token"),
+        "after_cursor": lease.get("after_cursor"),
+        "owner_task_id": lease.get("owner_task_id"),
+        "external_lifecycle_state": lifecycle_state,
+        "external_lifecycle_history": copy.deepcopy(
+            lease.get("external_lifecycle_history")
+        ),
+        "completed_at": utc_now(),
+    }
+    scheduler_state.setdefault("completed_actions", []).append(record)
+    del scheduler_state["route_leases"][lease_index]
+    scheduler_state["revision"] = int(scheduler_state.get("revision", 0)) + 1
+    _sync_legacy_active_claim_view(scheduler_state)
+
+
+def _validate_external_result_identity(
+    lease: dict[str, Any],
+    result: Any,
+    observed_authority_signal: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise ProtocolError("external result must be an object")
+    required = (
+        "schema_version",
+        "result_id",
+        "action_id",
+        "repository_id",
+        "lane_id",
+        "source_actor",
+        "source_thread_id",
+        "source_turn_id",
+        "source_message_id",
+        "disposition",
+        "based_on_frontier_epoch",
+        "frontier_event",
+        "authority_signal",
+        "mission_id",
+        "attempt_id",
+        "mission_before_sha256",
+        "mission_after",
+    )
+    missing = [field for field in required if field not in result]
+    if missing:
+        raise ProtocolError("external result missing: " + ", ".join(missing))
+    if result.get("schema_version") != 1:
+        raise ProtocolError("unsupported external result schema")
+    for field in (
+        "result_id",
+        "action_id",
+        "repository_id",
+        "lane_id",
+        "source_thread_id",
+        "source_turn_id",
+        "source_message_id",
+    ):
+        if not isinstance(result.get(field), str) or not result[field].strip():
+            raise ProtocolError(f"external result requires {field}")
+    action = lease.get("action", {})
+    route = action.get("payload", {}).get("route", {})
+    expected = {
+        "action_id": lease.get("action_id"),
+        "repository_id": lease.get("repository_id")
+        or route.get("repository_id"),
+        "lane_id": route.get("supervision_lane"),
+        "source_thread_id": lease.get("recipient_thread_id"),
+    }
+    for field, value in expected.items():
+        if result.get(field) != value:
+            raise ProtocolError(f"external result {field} identity mismatch")
+    action_mission_id = str(route.get("mission_id") or "")
+    action_attempt_id = str(route.get("attempt_id") or "")
+    result_mission_id = str(result.get("mission_id") or "")
+    result_attempt_id = str(result.get("attempt_id") or "")
+    if action_mission_id and result_mission_id != action_mission_id:
+        raise ProtocolError("external result mission_id identity mismatch")
+    if action_attempt_id and result_attempt_id != action_attempt_id:
+        raise ProtocolError("external result attempt_id identity mismatch")
+    if bool(result_mission_id) != bool(result_attempt_id):
+        raise ProtocolError("external result Mission identity is incomplete")
+    if result.get("source_actor") not in FRONTIER_SOURCE_ACTORS:
+        raise ProtocolError("external result source_actor is invalid")
+    recipient_kind = str(route.get("recipient_kind") or "")
+    expected_source_actor = {
+        "supervisor": "supervisor",
+        "worker": "worker",
+    }.get(recipient_kind)
+    if expected_source_actor and result.get("source_actor") != expected_source_actor:
+        raise ProtocolError(
+            "external result source_actor does not match route recipient"
+        )
+    if result.get("disposition") not in FRONTIER_DISPOSITIONS:
+        raise ProtocolError("external result disposition is invalid")
+    if not isinstance(result.get("based_on_frontier_epoch"), int):
+        raise ProtocolError("external result frontier epoch binding is invalid")
+    event = result.get("frontier_event")
+    validate_frontier_record(event)
+    event_bindings = {
+        "repository_id": result["repository_id"],
+        "lane_id": result["lane_id"],
+        "source_actor": result["source_actor"],
+        "source_message_id": result["source_message_id"],
+        "source_result_id": result["result_id"],
+        "disposition": result["disposition"],
+        "based_on_frontier_epoch": result["based_on_frontier_epoch"],
+    }
+    for field, value in event_bindings.items():
+        if event.get(field) != value:
+            raise ProtocolError(f"external result frontier_event {field} mismatch")
+    authority_signal = result.get("authority_signal")
+    if not isinstance(authority_signal, dict) or authority_signal.get(
+        "repository_id"
+    ) != result["repository_id"]:
+        raise ProtocolError("external result authority signal mismatch")
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{64}",
+        str(authority_signal.get("authority_fingerprint") or ""),
+    ):
+        raise ProtocolError("external result authority fingerprint is invalid")
+    expected_authority_hash = canonical_json_hash(
+        {
+            key: value
+            for key, value in authority_signal.items()
+            if key != "authority_fingerprint"
+        }
+    )
+    if authority_signal["authority_fingerprint"] != expected_authority_hash:
+        raise ProtocolError("external result authority fingerprint does not match")
+    if not isinstance(observed_authority_signal, dict):
+        raise ProtocolError(
+            "external result requires an independently observed authority signal"
+        )
+    validate_authority_signal_liveness(observed_authority_signal)
+    if authority_signal != observed_authority_signal:
+        raise ProtocolError(
+            "external result authority signal does not match current observation"
+        )
+    git = authority_signal.get("git")
+    if not isinstance(git, dict):
+        raise ProtocolError("external result requires Git high-water state")
+    if event.get("branch") is not None and git.get("branch") != event.get("branch"):
+        raise ProtocolError("external result branch binding mismatch")
+    if event.get("head_sha") is not None and git.get("head_sha") != event.get(
+        "head_sha"
+    ):
+        raise ProtocolError("external result head binding mismatch")
+    return result
+
+
+def _validated_mission_replacement(
+    missions: list[dict[str, Any]],
+    lease: dict[str, Any],
+    result: dict[str, Any],
+) -> tuple[int | None, dict[str, Any] | None]:
+    repository_id, action_mission_id, action_attempt_id = _action_mission_identity(
+        lease.get("action", {})
+    )
+    mission_id = str(result.get("mission_id") or action_mission_id or "")
+    attempt_id = str(result.get("attempt_id") or action_attempt_id or "")
+    if not mission_id and not attempt_id:
+        if lease.get("action", {}).get("kind") in {
+            "route_direction_update",
+            "route_project_question",
+        } and result.get("mission_before_sha256") is None and result.get(
+            "mission_after"
+        ) is None:
+            return None, None
+        raise ProtocolError("external result requires one exact Mission")
+    matches = [
+        (index, mission)
+        for index, mission in enumerate(missions)
+        if isinstance(mission, dict)
+        and str(mission.get("repository_id") or "") == repository_id
+        and str(mission.get("mission_id") or "") == mission_id
+        and str(mission.get("attempt_id") or "") == attempt_id
+    ]
+    if len(matches) != 1:
+        raise ProtocolError("external result requires one exact Mission")
+    index, current = matches[0]
+    if canonical_json_hash(current) != result.get("mission_before_sha256"):
+        raise ProtocolError("external result Mission CAS mismatch")
+    replacement = copy.deepcopy(result.get("mission_after"))
+    if not isinstance(replacement, dict):
+        raise ProtocolError("external result mission_after must be an object")
+    for field, expected in (
+        ("repository_id", repository_id),
+        ("mission_id", mission_id),
+        ("attempt_id", attempt_id),
+    ):
+        if str(replacement.get(field) or "") != expected:
+            raise ProtocolError(f"external result Mission {field} mismatch")
+    prior_events = current.get("events")
+    next_events = replacement.get("events")
+    if (
+        not isinstance(prior_events, list)
+        or not isinstance(next_events, list)
+        or next_events[: len(prior_events)] != prior_events
+        or len(next_events) <= len(prior_events)
+    ):
+        raise ProtocolError("external result Mission history must append evidence")
+    validate_mission(replacement)
+    return index, replacement
+
+
+def _apply_coordinator_input_result(
+    coordinator_state: dict[str, Any] | None,
+    lease: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    action = lease.get("action", {})
+    action_kind = str(action.get("kind") or "")
+    if action_kind not in {
+        "route_direction_update",
+        "route_project_question",
+        "route_user_response",
+    }:
+        return
+    if not isinstance(coordinator_state, dict):
+        raise ProtocolError(
+            "Coordinator input result requires exact Coordinator state"
+        )
+    validate_coordinator_state(coordinator_state)
+    input_disposition = str(result.get("input_disposition") or "")
+    if input_disposition not in {
+        "ADOPTED",
+        "DEFERRED",
+        "REJECTED",
+        "NEEDS_CLARIFICATION",
+        "SUPERSEDED",
+    }:
+        raise ProtocolError(
+            "Coordinator input result requires a semantic input disposition"
+        )
+    resolution = {
+        "state": "result_applied",
+        "input_disposition": input_disposition,
+        "result_id": result["result_id"],
+        "source_thread_id": result["source_thread_id"],
+        "source_turn_id": result["source_turn_id"],
+        "source_message_id": result["source_message_id"],
+        "frontier_event_id": result["frontier_event"]["frontier_event_id"],
+        "frontier_epoch": result["frontier_event"]["frontier_epoch"],
+        "result_applied_at": utc_now(),
+    }
+    if action_kind in {"route_direction_update", "route_project_question"}:
+        action_event = action.get("payload", {}).get("event", {})
+        event_id = str(action_event.get("event_id") or "")
+        pending = coordinator_state.get("pending_user_events", [])
+        matches = [
+            (index, item)
+            for index, item in enumerate(pending)
+            if isinstance(item, dict) and item.get("event_id") == event_id
+        ]
+        if len(matches) != 1:
+            raise ProtocolError(
+                "Coordinator input result requires exact pending event"
+            )
+        index, event = matches[0]
+        if event.get("repository_id") != result["repository_id"]:
+            raise ProtocolError("Coordinator input result repository mismatch")
+        if event.get("state") not in {"queued", "delivery_acknowledged"}:
+            raise ProtocolError("Coordinator input event is not pending")
+        if event.get("recipient_thread_id") not in {
+            None,
+            result["source_thread_id"],
+        }:
+            raise ProtocolError("Coordinator input recipient identity mismatch")
+        routed_event = {**copy.deepcopy(event), **resolution}
+        del pending[index]
+        coordinator_state.setdefault("routed_user_events", []).append(
+            routed_event
+        )
+    else:
+        pending = coordinator_state.get("pending_user_responses", [])
+        matches = [
+            (index, item)
+            for index, item in enumerate(pending)
+            if isinstance(item, dict)
+            and item.get("repository_id") == result["repository_id"]
+            and str(item.get("mission_id") or "")
+            == str(result.get("mission_id") or "")
+            and str(item.get("attempt_id") or "")
+            == str(result.get("attempt_id") or "")
+        ]
+        if len(matches) != 1:
+            raise ProtocolError(
+                "Coordinator input result requires exact pending user response"
+            )
+        index, response = matches[0]
+        if response.get("recipient_thread_id") != result["source_thread_id"]:
+            raise ProtocolError("USER_RESPONSE result recipient mismatch")
+        routed_response = {
+            **copy.deepcopy(response),
+            **resolution,
+            "response_state": "resolved",
+        }
+        del pending[index]
+        coordinator_state.setdefault("routed_user_responses", []).append(
+            routed_response
+        )
+    validate_coordinator_state(coordinator_state)
+
+
+def _refresh_portfolio_after_external_result(
+    portfolio: dict[str, Any],
+    scheduler_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    missions: list[dict[str, Any]],
+    authority_signals: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    refreshed = migrate_portfolio_to_frontier_v3(
+        portfolio, frontier_state, authority_signals
+    )
+    scheduler, routes = _active_scheduler_delivery_routes(scheduler_state)
+    refreshed["scheduler_revision"] = scheduler["revision"]
+    refreshed["active_routes"] = [
+        _scheduler_route_portfolio_projection(route) for route in routes
+    ]
+    refreshed["active_route_count"] = len(routes)
+    refreshed["concurrency_limit"] = scheduler["concurrency_limit"]
+    refreshed["execution_state"] = "WAITING_EXTERNAL" if routes else "IDLE"
+    route_by_repository: dict[str, list[dict[str, Any]]] = {}
+    for route in routes:
+        route_by_repository.setdefault(str(route.get("repository_id") or ""), []).append(
+            route
+        )
+    mission_by_repository = {
+        str(item.get("repository_id") or ""): item
+        for item in missions
+        if isinstance(item, dict)
+    }
+    for row in refreshed.get("repositories", []):
+        repository_id = str(row.get("repository_id") or "")
+        repository_routes = route_by_repository.get(repository_id, [])
+        mission = mission_by_repository.get(repository_id)
+        if repository_routes:
+            row["route_owner"] = " | ".join(
+                f"{route.get('action_id')} / {route.get('recipient_thread_id')} / {route.get('observer_kind')}"
+                for route in repository_routes
+            )
+            row["state"] = "WAITING_EXTERNAL"
+        else:
+            row["route_owner"] = "No active external route; exact result applied."
+            if row.get("frontier_status") != "verified":
+                row["state"] = "READY"
+                row["why"] = (
+                    "The external route ended without a current certified frontier."
+                )
+                row["next_move"] = (
+                    "Reconcile repository evidence and issue a FrontierCertificate."
+                )
+                row["route_owner"] = (
+                    "No active external route; frontier reconciliation is required."
+                )
+            elif isinstance(mission, dict) and mission.get("state") == "COMPLETE":
+                row["state"] = "PROJECT_COMPLETE"
+                row["progress"] = {
+                    "current_stage": "NEXT_ROUTE",
+                    "completed_stages": list(PORTFOLIO_STAGE_ORDER),
+                }
+                row["next_move"] = "Reconcile and certify any later frontier event."
+    refreshed["frontier_revision"] = frontier_state["revision"]
+    refreshed["frontier_safety_mode"] = frontier_state["safety_mode"]
+    refreshed["semantic_fingerprint"] = portfolio_semantic_fingerprint(refreshed)
+    return refreshed
+
+
+def apply_external_result_transaction(
+    scheduler_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    missions: list[dict[str, Any]],
+    portfolio: dict[str, Any],
+    action_id: str,
+    result: dict[str, Any],
+    *,
+    observed_authority_signal: dict[str, Any] | None = None,
+    coordinator_state: dict[str, Any] | None = None,
+    actor_task_id: str | None = None,
+) -> dict[str, Any]:
+    """Atomically reduce one exact result across all semantic projections."""
+    _ensure_scheduler_state_v2(scheduler_state)
+    validate_frontier_state(frontier_state)
+    result_id = str(result.get("result_id") or "") if isinstance(result, dict) else ""
+    result_hash = canonical_json_hash(result) if isinstance(result, dict) else ""
+    prior = next(
+        (
+            item
+            for item in frontier_state.get("applied_results", [])
+            if isinstance(item, dict) and item.get("result_id") == result_id
+        ),
+        None,
+    )
+    if isinstance(prior, dict):
+        if prior.get("result_sha256") != result_hash:
+            raise ProtocolError("conflicting external result replay")
+        completion = next(
+            (
+                item
+                for item in scheduler_state.get("completed_actions", [])
+                if isinstance(item, dict) and item.get("action_id") == action_id
+            ),
+            None,
+        )
+        if not isinstance(completion, dict) or completion.get(
+            "external_lifecycle_state"
+        ) != "result_applied":
+            raise ProtocolError("applied external result lacks scheduler completion")
+        return {
+            "classification": "EXTERNAL_RESULT_ALREADY_APPLIED",
+            "action_id": action_id,
+            "result_id": result_id,
+            "deduplicated": True,
+        }
+    scheduler_work = copy.deepcopy(scheduler_state)
+    frontier_work = copy.deepcopy(frontier_state)
+    missions_work = copy.deepcopy(missions)
+    portfolio_work = copy.deepcopy(portfolio)
+    coordinator_work = (
+        copy.deepcopy(coordinator_state)
+        if isinstance(coordinator_state, dict)
+        else None
+    )
+    lease_index = _route_lease_index(scheduler_work, action_id)
+    if lease_index is None:
+        raise ProtocolError("external result requires an exact route lease")
+    lease = scheduler_work["route_leases"][lease_index]
+    _bind_or_validate_scheduler_record_owner(lease, actor_task_id)
+    try:
+        validated_result = _validate_external_result_identity(
+            lease, result, observed_authority_signal
+        )
+        _set_external_lifecycle(
+            lease,
+            "result_received",
+            details={"result_id": validated_result["result_id"]},
+        )
+        _set_external_lifecycle(
+            lease,
+            "result_parsed",
+            details={"result_sha256": result_hash},
+        )
+    except ProtocolError as exc:
+        if lease.get("external_lifecycle_state") in {
+            "dispatched",
+            "delivery_acknowledged",
+            "result_received",
+            "result_parsed",
+        }:
+            _set_external_lifecycle(
+                lease, "failed", details={"reason": str(exc)}
+            )
+            frontier_work["failed_results"].append(
+                {
+                    "result_id": result_id or None,
+                    "action_id": action_id,
+                    "result_sha256": result_hash or None,
+                    "reason": str(exc),
+                    "recorded_at": utc_now(),
+                }
+            )
+            frontier_work["revision"] += 1
+            failure_evidence = {
+                "result_id": result_id or None,
+                "result_sha256": result_hash or None,
+                "reason": str(exc),
+            }
+            _close_terminal_external_route(
+                scheduler_work,
+                lease_index,
+                outcome="external_result_failed",
+                evidence=failure_evidence,
+            )
+            portfolio_work = _refresh_portfolio_after_external_result(
+                portfolio_work,
+                scheduler_work,
+                frontier_work,
+                missions_work,
+                [],
+            )
+            validate_frontier_state(frontier_work)
+            _validate_scheduler_state_v2(scheduler_work)
+            validate_portfolio_scheduler_consistency(
+                portfolio_work, scheduler_work
+            )
+            validate_portfolio_frontier_consistency(
+                portfolio_work, frontier_work, []
+            )
+            scheduler_state.clear()
+            scheduler_state.update(scheduler_work)
+            frontier_state.clear()
+            frontier_state.update(frontier_work)
+            portfolio.clear()
+            portfolio.update(portfolio_work)
+        return {
+            "classification": "EXTERNAL_RESULT_FAILED",
+            "action_id": action_id,
+            "result_id": result_id or None,
+            "reason": str(exc),
+            "deduplicated": False,
+        }
+    key = _frontier_key(result["repository_id"], result["lane_id"])
+    current = frontier_work["records"].get(key)
+    current_epoch = int(current.get("frontier_epoch", 0)) if current else 0
+    if result["based_on_frontier_epoch"] != current_epoch:
+        _set_external_lifecycle(
+            lease,
+            "stale_result_quarantined",
+            details={
+                "result_id": result_id,
+                "expected_frontier_epoch": current_epoch,
+                "based_on_frontier_epoch": result["based_on_frontier_epoch"],
+            },
+        )
+        frontier_work["quarantined_results"].append(
+            {
+                "result_id": result_id,
+                "action_id": action_id,
+                "repository_id": result["repository_id"],
+                "lane_id": result["lane_id"],
+                "result_sha256": result_hash,
+                "expected_frontier_epoch": current_epoch,
+                "based_on_frontier_epoch": result["based_on_frontier_epoch"],
+                "recorded_at": utc_now(),
+            }
+        )
+        frontier_work["revision"] += 1
+        quarantine_evidence = {
+            "result_id": result_id,
+            "result_sha256": result_hash,
+            "expected_frontier_epoch": current_epoch,
+            "based_on_frontier_epoch": result["based_on_frontier_epoch"],
+        }
+        _close_terminal_external_route(
+            scheduler_work,
+            lease_index,
+            outcome="stale_result_quarantined",
+            evidence=quarantine_evidence,
+        )
+        portfolio_work = _refresh_portfolio_after_external_result(
+            portfolio_work,
+            scheduler_work,
+            frontier_work,
+            missions_work,
+            [result["authority_signal"]],
+        )
+        validate_frontier_state(frontier_work)
+        _validate_scheduler_state_v2(scheduler_work)
+        validate_portfolio_scheduler_consistency(portfolio_work, scheduler_work)
+        validate_portfolio_frontier_consistency(
+            portfolio_work, frontier_work, [result["authority_signal"]]
+        )
+        scheduler_state.clear()
+        scheduler_state.update(scheduler_work)
+        frontier_state.clear()
+        frontier_state.update(frontier_work)
+        portfolio.clear()
+        portfolio.update(portfolio_work)
+        return {
+            "classification": "STALE_EXTERNAL_RESULT_QUARANTINED",
+            "action_id": action_id,
+            "result_id": result_id,
+            "expected_frontier_epoch": current_epoch,
+            "deduplicated": False,
+        }
+    mission_index, replacement = _validated_mission_replacement(
+        missions_work, lease, result
+    )
+    _set_external_lifecycle(
+        lease,
+        "result_validated",
+        details={"result_id": result_id},
+    )
+    frontier_application = apply_frontier_event(
+        frontier_work, result["frontier_event"]
+    )
+    if frontier_application["classification"] != "FRONTIER_EVENT_APPLIED":
+        _set_external_lifecycle(
+            lease,
+            "stale_result_quarantined",
+            details={
+                "result_id": result_id,
+                "frontier_classification": frontier_application[
+                    "classification"
+                ],
+            },
+        )
+        frontier_work["quarantined_results"].append(
+            {
+                "result_id": result_id,
+                "action_id": action_id,
+                "repository_id": result["repository_id"],
+                "lane_id": result["lane_id"],
+                "result_sha256": result_hash,
+                "frontier_classification": frontier_application[
+                    "classification"
+                ],
+                "recorded_at": utc_now(),
+            }
+        )
+        frontier_work["revision"] += 1
+        quarantine_evidence = {
+            "result_id": result_id,
+            "result_sha256": result_hash,
+            "frontier_classification": frontier_application[
+                "classification"
+            ],
+        }
+        _close_terminal_external_route(
+            scheduler_work,
+            lease_index,
+            outcome="stale_result_quarantined",
+            evidence=quarantine_evidence,
+        )
+        portfolio_work = _refresh_portfolio_after_external_result(
+            portfolio_work,
+            scheduler_work,
+            frontier_work,
+            missions_work,
+            [result["authority_signal"]],
+        )
+        validate_frontier_state(frontier_work)
+        _validate_scheduler_state_v2(scheduler_work)
+        validate_portfolio_scheduler_consistency(portfolio_work, scheduler_work)
+        validate_portfolio_frontier_consistency(
+            portfolio_work, frontier_work, [result["authority_signal"]]
+        )
+        scheduler_state.clear()
+        scheduler_state.update(scheduler_work)
+        frontier_state.clear()
+        frontier_state.update(frontier_work)
+        portfolio.clear()
+        portfolio.update(portfolio_work)
+        return {
+            "classification": "STALE_EXTERNAL_RESULT_QUARANTINED",
+            "action_id": action_id,
+            "result_id": result_id,
+            "deduplicated": False,
+        }
+    certificate = None
+    if result["disposition"] in FRONTIER_ADVANCE_DISPOSITIONS:
+        certificate = issue_frontier_certificate(
+            frontier_work,
+            result["repository_id"],
+            result["lane_id"],
+            result["authority_signal"],
+        )
+    if mission_index is not None and replacement is not None:
+        replacement["frontier_certificate"] = copy.deepcopy(certificate)
+        replacement["active_artifact"] = (
+            {
+                "artifact_id": certificate.get("artifact_id"),
+                "artifact_revision": certificate.get("artifact_revision"),
+                "artifact_sha256": certificate.get("artifact_sha256"),
+            }
+            if isinstance(certificate, dict)
+            else None
+        )
+        missions_work[mission_index] = replacement
+    _apply_coordinator_input_result(coordinator_work, lease, result)
+    evidence = _external_result_evidence(result)
+    _set_external_lifecycle(
+        lease,
+        "result_applied",
+        details={
+            "result_id": result_id,
+            "frontier_event_id": result["frontier_event"]["frontier_event_id"],
+        },
+    )
+    complete_coordinator_action(
+        scheduler_work,
+        action_id,
+        "result_applied",
+        evidence=evidence,
+        actor_task_id=actor_task_id,
+    )
+    frontier_work["applied_results"].append(
+        {
+            **copy.deepcopy(evidence),
+            "action_id": action_id,
+            "result_sha256": result_hash,
+            "applied_at": utc_now(),
+        }
+    )
+    frontier_work["revision"] += 1
+    portfolio_work = _refresh_portfolio_after_external_result(
+        portfolio_work,
+        scheduler_work,
+        frontier_work,
+        missions_work,
+        [result["authority_signal"]],
+    )
+    validate_frontier_state(frontier_work)
+    _validate_scheduler_state_v2(scheduler_work)
+    for mission in missions_work:
+        validate_mission(mission)
+    if coordinator_work is not None:
+        validate_coordinator_state(coordinator_work)
+    validate_portfolio_scheduler_consistency(portfolio_work, scheduler_work)
+    validate_portfolio_frontier_consistency(
+        portfolio_work, frontier_work, [result["authority_signal"]]
+    )
+    scheduler_state.clear()
+    scheduler_state.update(scheduler_work)
+    frontier_state.clear()
+    frontier_state.update(frontier_work)
+    missions.clear()
+    missions.extend(missions_work)
+    portfolio.clear()
+    portfolio.update(portfolio_work)
+    if coordinator_state is not None and coordinator_work is not None:
+        coordinator_state.clear()
+        coordinator_state.update(coordinator_work)
+    return {
+        "classification": "EXTERNAL_RESULT_APPLIED",
+        "action_id": action_id,
+        "result_id": result_id,
+        "frontier_epoch": result["frontier_event"]["frontier_epoch"],
+        "certificate_id": (
+            certificate["certificate_id"]
+            if isinstance(certificate, dict)
+            else None
+        ),
+        "deduplicated": False,
+    }
+
+
+def apply_external_result_transaction_files(
+    *,
+    scheduler_path: Path | str,
+    frontier_path: Path | str,
+    missions_dir: Path | str,
+    portfolio_path: Path | str,
+    journal_dir: Path | str,
+    action_id: str,
+    result: dict[str, Any],
+    observed_authority_signal: dict[str, Any] | None = None,
+    coordinator_path: Path | str | None = None,
+    actor_task_id: str | None = None,
+    failure_after_write: int | None = None,
+) -> dict[str, Any]:
+    """Persist a replayable write-ahead transaction across state projections."""
+    result_id = str(result.get("result_id") or "")
+    if not result_id:
+        raise ProtocolError("external result transaction requires result_id")
+    transaction_id = canonical_json_hash(
+        {"action_id": action_id, "result_id": result_id}
+    )
+    journal_path = Path(journal_dir) / f"{transaction_id}.json"
+    result_sha256 = canonical_json_hash(result)
+
+    def persist_desired(journal: dict[str, Any]) -> int:
+        desired = journal.get("desired_state")
+        if not isinstance(desired, dict):
+            raise ProtocolError("frontier transaction journal lacks desired state")
+        writes: list[tuple[Path, Any]] = [
+            (Path(frontier_path), desired["frontier"]),
+        ]
+        mission_outputs = desired.get("missions", [])
+        if not isinstance(mission_outputs, list):
+            raise ProtocolError("frontier transaction journal missions are invalid")
+        writes.extend(
+            (Path(str(item["path"])), item["value"])
+            for item in mission_outputs
+            if isinstance(item, dict)
+        )
+        writes.extend(
+            [
+                (Path(scheduler_path), desired["scheduler"]),
+                (Path(portfolio_path), desired["portfolio"]),
+            ]
+        )
+        coordinator_output = desired.get("coordinator")
+        if isinstance(coordinator_output, dict):
+            writes.insert(
+                -1,
+                (
+                    Path(str(coordinator_output["path"])),
+                    coordinator_output["value"],
+                ),
+            )
+        completed_writes = 0
+        for target, value in writes:
+            atomic_write_json(target, value)
+            completed_writes += 1
+            if failure_after_write == completed_writes:
+                raise OSError("injected frontier transaction interruption")
+        return completed_writes
+
+    if journal_path.is_file():
+        journal = load_json(journal_path)
+        if journal.get("result_sha256") != result_sha256:
+            raise ProtocolError("frontier transaction result replay mismatch")
+        writes = persist_desired(journal)
+        journal["state"] = "applied"
+        journal["replayed_at"] = utc_now()
+        atomic_write_json(journal_path, journal)
+        return {
+            "classification": "EXTERNAL_RESULT_TRANSACTION_REPLAYED",
+            "transaction_id": transaction_id,
+            "result_id": result_id,
+            "write_count": writes,
+            "deduplicated": True,
+        }
+
+    scheduler = load_scheduler_state(scheduler_path)
+    mission_directory = Path(missions_dir)
+    mission_paths = sorted(mission_directory.glob("*.json"))
+    missions = [load_json(path) for path in mission_paths]
+    portfolio = load_json(portfolio_path)
+    coordinator = (
+        load_json(coordinator_path) if coordinator_path is not None else None
+    )
+    frontier = load_frontier_state(
+        frontier_path,
+        (str(item.get("repository_id") or "") for item in missions),
+    )
+    original_missions = copy.deepcopy(missions)
+    outcome = apply_external_result_transaction(
+        scheduler,
+        frontier,
+        missions,
+        portfolio,
+        action_id,
+        result,
+        observed_authority_signal=observed_authority_signal,
+        coordinator_state=coordinator,
+        actor_task_id=actor_task_id,
+    )
+    mission_outputs: list[dict[str, Any]] = []
+    for index, mission in enumerate(missions):
+        if index < len(mission_paths):
+            target = mission_paths[index]
+            if index < len(original_missions) and mission == original_missions[index]:
+                continue
+        else:
+            target = _mission_path(mission_directory, mission)
+        mission_outputs.append({"path": str(target), "value": mission})
+    journal = {
+        "schema_version": 1,
+        "transaction_id": transaction_id,
+        "state": "prepared",
+        "action_id": action_id,
+        "result_id": result_id,
+        "result_sha256": result_sha256,
+        "prepared_at": utc_now(),
+        "desired_state": {
+            "frontier": frontier,
+            "missions": mission_outputs,
+            "scheduler": scheduler,
+            "portfolio": portfolio,
+            "coordinator": (
+                {"path": str(coordinator_path), "value": coordinator}
+                if coordinator_path is not None and coordinator is not None
+                else None
+            ),
+        },
+    }
+    atomic_write_json(journal_path, journal)
+    writes = persist_desired(journal)
+    journal["state"] = "applied"
+    journal["applied_at"] = utc_now()
+    atomic_write_json(journal_path, journal)
+    return {
+        **outcome,
+        "classification": "EXTERNAL_RESULT_TRANSACTION_APPLIED",
+        "transaction_id": transaction_id,
+        "write_count": writes,
+        "journal_path": str(journal_path),
+    }
+
+
+def audit_frontier_state(
+    registry: dict[str, Any],
+    missions: Iterable[dict[str, Any]],
+    frontier_state: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+    *,
+    portfolio: dict[str, Any] | None = None,
+    scheduler_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    repository_ids = [
+        str(item.get("repository_id") or "")
+        for item in registry.get("repositories", [])
+        if isinstance(item, dict) and item.get("repository_id")
+    ]
+    frontier = migrate_frontier_state(frontier_state, repository_ids)
+    signals = list(authority_signals)
+    signal_by_repository = {
+        str(item.get("repository_id") or ""): item
+        for item in signals
+        if isinstance(item, dict) and item.get("repository_id")
+    }
+    mission_list = [item for item in missions if isinstance(item, dict)]
+    findings: list[dict[str, Any]] = []
+    for repository in registry.get("repositories", []):
+        if not isinstance(repository, dict):
+            continue
+        repository_id = str(repository.get("repository_id") or "")
+        lanes = {
+            str(repository.get("default_supervision_lane") or "default"),
+            *(
+                str(item.get("supervision_lane") or "default")
+                for item in mission_list
+                if item.get("repository_id") == repository_id
+            ),
+        }
+        for lane in sorted(lanes):
+            decision = frontier_gate_decision(
+                frontier,
+                repository_id,
+                lane,
+                action_kind="advance_mission",
+                expected_artifact=None,
+                authority_signal=signal_by_repository.get(repository_id),
+            )
+            if decision["classification"] != "FRONTIER_CERTIFIED":
+                current = frontier.get("records", {}).get(
+                    _frontier_key(repository_id, lane)
+                )
+                findings.append(
+                    {
+                        "repository_id": repository_id,
+                        "lane_id": lane,
+                        "classification": "RECONCILIATION_REQUIRED",
+                        "reasons": decision["reasons"],
+                        "recommended_reconciliation_event": {
+                            "kind": "frontier_reconciliation_event",
+                            "based_on_frontier_epoch": (
+                                int(current.get("frontier_epoch", 0))
+                                if isinstance(current, dict)
+                                else 0
+                            ),
+                            "required_evidence": [
+                                "current independent Git/authority observation",
+                                "exact artifact or null-frontier disposition lineage",
+                                "exact source message/result identity",
+                            ],
+                            "candidate_event_generated": False,
+                        },
+                    }
+                )
+    scheduler: dict[str, Any] | None = None
+    if isinstance(scheduler_state, dict):
+        scheduler = migrate_scheduler_state(scheduler_state)
+        _validate_scheduler_state_v2(scheduler)
+        _, active_routes = _active_scheduler_delivery_routes(scheduler)
+        for route in active_routes:
+            if route.get("action", {}).get("requires_external_result") is True:
+                findings.append(
+                    {
+                        "repository_id": route.get("repository_id"),
+                        "action_id": route.get("action_id"),
+                        "classification": "UNAPPLIED_EXTERNAL_RESULT",
+                        "external_lifecycle_state": route.get(
+                            "external_lifecycle_state"
+                        ),
+                        "recommended_reconciliation_event": {
+                            "kind": "apply_exact_external_result_or_continue_observation",
+                            "delivery_token": route.get("delivery_token"),
+                            "candidate_event_generated": False,
+                        },
+                    }
+                )
+    for item in frontier.get("quarantined_results", []):
+        if isinstance(item, dict):
+            findings.append(
+                {
+                    "repository_id": item.get("repository_id"),
+                    "action_id": item.get("action_id"),
+                    "result_id": item.get("result_id"),
+                    "classification": "QUARANTINED_RESULT_AUDIT",
+                    "recommended_reconciliation_event": {
+                        "kind": "observe_current_frontier_without_replaying_quarantine",
+                        "candidate_event_generated": False,
+                    },
+                }
+            )
+    portfolio_status = "not_supplied"
+    if isinstance(portfolio, dict):
+        try:
+            validate_portfolio_frontier_consistency(portfolio, frontier, signals)
+            if scheduler is not None:
+                validate_portfolio_scheduler_consistency(portfolio, scheduler)
+            portfolio_status = "consistent"
+        except ProtocolError as exc:
+            portfolio_status = "reconciliation_required"
+            findings.append(
+                {
+                    "classification": "PORTFOLIO_RECONCILIATION_REQUIRED",
+                    "reasons": [str(exc)],
+                }
+            )
+    return {
+        "classification": (
+            "FRONTIER_AUDIT_CLEAR"
+            if not findings
+            else "FRONTIER_RECONCILIATION_REQUIRED"
+        ),
+        "schema_version": FRONTIER_STATE_VERSION,
+        "safety_mode": frontier["safety_mode"],
+        "frontier_revision": frontier["revision"],
+        "repository_count": len(repository_ids),
+        "verified_frontier_count": len(frontier["records"]),
+        "quarantined_result_count": len(frontier["quarantined_results"]),
+        "portfolio_status": portfolio_status,
+        "findings": findings,
+        "dry_run": True,
+        "mutated": False,
     }
 
 
@@ -7193,7 +9742,7 @@ def acknowledge_user_response_routed(
     coordinator_state: dict[str, Any],
     response_id: str,
 ) -> dict[str, Any]:
-    """Advance a queued response only after exact-Supervisor send succeeds."""
+    """Record delivery only; a later Supervisor result advances the Mission."""
     if mission.get("state") not in {"USER_DECISION", "USER_ACTION"}:
         raise ProtocolError("USER_RESPONSE routing acknowledgement requires a parked Mission")
     key = _mission_response_key(mission)
@@ -7217,31 +9766,25 @@ def acknowledge_user_response_routed(
     if matched.get("recipient_thread_id") != mission.get("supervisor_thread_id"):
         raise ProtocolError("queued USER_RESPONSE exact Supervisor binding drift")
 
-    pending.pop(matched_index)
-    routed_at = utc_now()
-    routed = copy.deepcopy(matched)
-    routed["response_state"] = "routed"
-    routed["routed_at"] = routed_at
-    coordinator_state.setdefault("routed_user_responses", []).append(routed)
-    mission["user_response_ready"] = False
-    mission["last_routed_user_response_id"] = response_id
-    mission.pop("queued_user_response_id", None)
-    _record_state(
-        mission,
-        USER_RESPONSE_ADJUDICATION_STATE,
-        {
+    if matched.get("response_state") == "delivery_acknowledged":
+        return {
+            "classification": "USER_RESPONSE_DELIVERY_ALREADY_ACKNOWLEDGED",
             "response_id": response_id,
             "recipient_thread_id": matched["recipient_thread_id"],
-            "terminal_route_being_resumed": matched[
-                "terminal_route_being_resumed"
-            ],
-        },
-    )
+            "mission_state": mission["state"],
+            "semantic_result_applied": False,
+            "deduplicated": True,
+        }
+    matched["response_state"] = "delivery_acknowledged"
+    matched["delivery_acknowledged_at"] = utc_now()
+    mission["user_response_ready"] = False
     return {
-        "classification": "USER_RESPONSE_ROUTED_TO_EXACT_SUPERVISOR",
+        "classification": "USER_RESPONSE_DELIVERY_ACKNOWLEDGED",
         "response_id": response_id,
         "recipient_thread_id": matched["recipient_thread_id"],
         "mission_state": mission["state"],
+        "semantic_result_applied": False,
+        "deduplicated": False,
     }
 
 
@@ -8103,6 +10646,31 @@ def validate_mission_value_contract(contract: Any) -> None:
                 "changes, genre/domain shifts, exploratory work, and strategic "
                 "bets require explicit user authorization evidence"
             )
+
+
+def validate_mission_value_contract_frontier(
+    contract: Any, certificate: dict[str, Any]
+) -> None:
+    validate_mission_value_contract(contract)
+    if not isinstance(certificate, dict):
+        raise ProtocolError("MISSION_VALUE_GATE: frontier certificate is required")
+    if contract.get("authority_fingerprint") != certificate.get(
+        "authority_fingerprint"
+    ):
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: authority fingerprint is stale relative to frontier"
+        )
+    if (
+        contract.get("existing_artifact_reused") is True
+        and not certificate.get("artifact_id")
+    ):
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: reuse claim lacks a certified current artifact"
+        )
+    if certificate.get("disposition") not in FRONTIER_ADVANCE_DISPOSITIONS:
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: current frontier is not advanceable"
+        )
 
 
 def require_new_mission_value_contract(payload: dict[str, Any]) -> None:
@@ -9273,6 +11841,15 @@ def _live_mutation_targets(args: argparse.Namespace) -> list[Path]:
         "coordinator-action-claim": ("scheduler_state",),
         "coordinator-action-prepare": ("scheduler_state",),
         "coordinator-action-sent": ("scheduler_state",),
+        "coordinator-action-delivery-ack": ("scheduler_state",),
+        "coordinator-action-apply-result": (
+            "coordinator_state",
+            "scheduler_state",
+            "frontier_state",
+            "missions_dir",
+            "portfolio",
+            "journal_dir",
+        ),
         "coordinator-action-complete": ("scheduler_state", "coordinator_state"),
         "coordinator-action-release": ("scheduler_state",),
         "authorized-runtime-action-register": ("coordinator_state",),
@@ -9348,6 +11925,10 @@ def _require_canonical_live_mutation_paths(args: argparse.Namespace) -> None:
             "input": DEFAULT_PORTFOLIO_JSON,
             "output": DEFAULT_PORTFOLIO_MARKDOWN,
             "scheduler_state": DEFAULT_SCHEDULER_STATE,
+            "frontier_state": DEFAULT_FRONTIER_STATE,
+            "registry": DEFAULT_BINDINGS,
+            "hosts": DEFAULT_HOSTS,
+            "adapter": DEFAULT_ADAPTER,
         },
         "terminal": {"mission": DEFAULT_MISSIONS},
         "route-user-response": {"mission": DEFAULT_MISSIONS},
@@ -9363,6 +11944,17 @@ def _require_canonical_live_mutation_paths(args: argparse.Namespace) -> None:
             "scheduler_state": DEFAULT_SCHEDULER_STATE
         },
         "coordinator-action-sent": {"scheduler_state": DEFAULT_SCHEDULER_STATE},
+        "coordinator-action-delivery-ack": {
+            "scheduler_state": DEFAULT_SCHEDULER_STATE
+        },
+        "coordinator-action-apply-result": {
+            "coordinator_state": DEFAULT_COORDINATOR_STATE,
+            "scheduler_state": DEFAULT_SCHEDULER_STATE,
+            "frontier_state": DEFAULT_FRONTIER_STATE,
+            "missions_dir": DEFAULT_MISSIONS,
+            "portfolio": DEFAULT_PORTFOLIO_JSON,
+            "journal_dir": DEFAULT_FRONTIER_JOURNAL,
+        },
         "coordinator-action-complete": {
             "scheduler_state": DEFAULT_SCHEDULER_STATE
         },
@@ -9636,6 +12228,9 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
+    resolve.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
     resolve.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("contract")
@@ -9709,6 +12304,9 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
+    validate.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
 
     mission_init = sub.add_parser("mission-init")
     mission_init.add_argument("--payload", required=True, type=Path)
@@ -9772,6 +12370,9 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_status.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
+    coordinator_status.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
 
     portfolio_render = sub.add_parser("portfolio-render")
     portfolio_render.add_argument(
@@ -9786,6 +12387,14 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio_render.add_argument(
         "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
     )
+    portfolio_render.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    portfolio_render.add_argument(
+        "--registry", type=Path, default=DEFAULT_BINDINGS
+    )
+    portfolio_render.add_argument("--hosts", type=Path, default=DEFAULT_HOSTS)
+    portfolio_render.add_argument("--adapter", type=Path, default=DEFAULT_ADAPTER)
     portfolio_render.add_argument("--dry-run", action="store_true")
 
     coordinator_plan = sub.add_parser("coordinator-plan")
@@ -9804,6 +12413,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coordinator_plan.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    coordinator_plan.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
     )
 
     coordinator_claim = sub.add_parser("coordinator-action-claim")
@@ -9824,6 +12436,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coordinator_claim.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    coordinator_claim.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
     )
     coordinator_claim.add_argument("--dry-run", action="store_true")
 
@@ -9852,6 +12467,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coordinator_sent.add_argument("--dry-run", action="store_true")
 
+    coordinator_delivery_ack = sub.add_parser(
+        "coordinator-action-delivery-ack"
+    )
+    coordinator_delivery_ack.add_argument("--action-id", required=True)
+    coordinator_delivery_ack.add_argument("--delivery-ack-id", required=True)
+    coordinator_delivery_ack.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    coordinator_delivery_ack.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    coordinator_delivery_ack.add_argument("--dry-run", action="store_true")
+
+    coordinator_apply_result = sub.add_parser(
+        "coordinator-action-apply-result"
+    )
+    coordinator_apply_result.add_argument("--action-id", required=True)
+    coordinator_apply_result.add_argument("--result", required=True, type=Path)
+    coordinator_apply_result.add_argument(
+        "--registry", type=Path, default=DEFAULT_BINDINGS
+    )
+    coordinator_apply_result.add_argument(
+        "--hosts", type=Path, default=DEFAULT_HOSTS
+    )
+    coordinator_apply_result.add_argument(
+        "--adapter", type=Path, default=DEFAULT_ADAPTER
+    )
+    coordinator_apply_result.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    coordinator_apply_result.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    coordinator_apply_result.add_argument(
+        "--missions-dir", type=Path, default=DEFAULT_MISSIONS
+    )
+    coordinator_apply_result.add_argument(
+        "--portfolio", type=Path, default=DEFAULT_PORTFOLIO_JSON
+    )
+    coordinator_apply_result.add_argument(
+        "--journal-dir", type=Path, default=DEFAULT_FRONTIER_JOURNAL
+    )
+    coordinator_apply_result.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    coordinator_apply_result.add_argument("--dry-run", action="store_true")
+
     coordinator_complete = sub.add_parser("coordinator-action-complete")
     coordinator_complete.add_argument("--action-id", required=True)
     coordinator_complete.add_argument("--outcome", required=True)
@@ -9874,6 +12536,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
     )
     coordinator_release.add_argument("--dry-run", action="store_true")
+
+    frontier_audit = sub.add_parser("frontier-audit")
+    frontier_audit.add_argument("--registry", type=Path, default=DEFAULT_BINDINGS)
+    frontier_audit.add_argument("--hosts", type=Path, default=DEFAULT_HOSTS)
+    frontier_audit.add_argument("--adapter", type=Path, default=DEFAULT_ADAPTER)
+    frontier_audit.add_argument(
+        "--missions-dir", type=Path, default=DEFAULT_MISSIONS
+    )
+    frontier_audit.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    frontier_audit.add_argument(
+        "--portfolio", type=Path, default=DEFAULT_PORTFOLIO_JSON
+    )
+    frontier_audit.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    frontier_audit.add_argument("--dry-run", action="store_true", default=True)
 
     runtime_register = sub.add_parser("authorized-runtime-action-register")
     runtime_register.add_argument("--spec", type=Path, required=True)
@@ -10025,6 +12705,14 @@ def main(argv: list[str] | None = None) -> int:
                         scheduler_state,
                         authority_signals=collect_authority_signals(
                             registry, hosts, adapter
+                        ),
+                        frontier_state=load_frontier_state(
+                            args.frontier_state,
+                            (
+                                str(item.get("repository_id") or "")
+                                for item in registry.get("repositories", [])
+                                if isinstance(item, dict)
+                            ),
                         ),
                     )
                     action = plan.get("next_action")
@@ -10250,6 +12938,14 @@ def main(argv: list[str] | None = None) -> int:
                 authority_signals=collect_authority_signals(
                     registry, hosts, adapter
                 ),
+                frontier_state=load_frontier_state(
+                    args.frontier_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                    ),
+                ),
             )
             if plan.get("next_action") and not plan.get(
                 "cycle_should_continue_now"
@@ -10271,6 +12967,38 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
+
+        if args.command == "frontier-audit":
+            registry = load_json(args.registry)
+            hosts = load_json(args.hosts)
+            adapter = load_json(args.adapter)
+            validate_registry(registry, hosts)
+            missions = load_missions(args.missions_dir)
+            signals = collect_authority_signals(registry, hosts, adapter)
+            frontier_state = load_frontier_state(
+                args.frontier_state,
+                (
+                    str(item.get("repository_id") or "")
+                    for item in registry.get("repositories", [])
+                    if isinstance(item, dict)
+                ),
+            )
+            portfolio = load_json(args.portfolio) if args.portfolio.is_file() else None
+            scheduler_state = (
+                load_scheduler_state(args.scheduler_state)
+                if args.scheduler_state.is_file()
+                else None
+            )
+            result = audit_frontier_state(
+                registry,
+                missions,
+                frontier_state,
+                signals,
+                portfolio=portfolio,
+                scheduler_state=scheduler_state,
+            )
+            _json_stdout(result)
+            return 0 if result["classification"] == "FRONTIER_AUDIT_CLEAR" else 2
 
         if args.command == "authorized-runtime-action-register":
             coordinator_state, actor_task_id = _authorized_cli_writer(args)
@@ -10394,6 +13122,22 @@ def main(argv: list[str] | None = None) -> int:
             portfolio = load_json(args.input)
             scheduler_state = load_scheduler_state(args.scheduler_state)
             validate_portfolio_scheduler_consistency(portfolio, scheduler_state)
+            registry = load_json(args.registry)
+            hosts = load_json(args.hosts)
+            adapter = load_json(args.adapter)
+            frontier_state = load_frontier_state(
+                args.frontier_state,
+                (
+                    str(item.get("repository_id") or "")
+                    for item in registry.get("repositories", [])
+                    if isinstance(item, dict)
+                ),
+            )
+            validate_portfolio_frontier_consistency(
+                portfolio,
+                frontier_state,
+                collect_authority_signals(registry, hosts, adapter),
+            )
             rendered = render_portfolio_markdown(portfolio)
             if not args.dry_run:
                 atomic_write_text(args.output, rendered)
@@ -10436,6 +13180,14 @@ def main(argv: list[str] | None = None) -> int:
                 authority_signals=collect_authority_signals(
                     registry, hosts, adapter
                 ),
+                frontier_state=load_frontier_state(
+                    args.frontier_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                    ),
+                ),
             )
             if args.command == "coordinator-action-claim":
                 coordinator_state, actor_task_id = _authorized_cli_writer(args)
@@ -10472,6 +13224,79 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not args.dry_run:
                 atomic_write_json(args.scheduler_state, scheduler_state)
+            result["dry_run"] = bool(args.dry_run)
+            _json_stdout(result)
+            return 0
+
+        if args.command == "coordinator-action-delivery-ack":
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
+            scheduler_state = load_scheduler_state(args.scheduler_state)
+            result = acknowledge_coordinator_action_delivery(
+                scheduler_state,
+                args.action_id,
+                args.delivery_ack_id,
+                actor_task_id=actor_task_id,
+            )
+            if not args.dry_run:
+                atomic_write_json(args.scheduler_state, scheduler_state)
+            result["dry_run"] = bool(args.dry_run)
+            _json_stdout(result)
+            return 0
+
+        if args.command == "coordinator-action-apply-result":
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
+            result_payload = load_json(args.result)
+            registry = load_json(args.registry)
+            hosts = load_json(args.hosts)
+            adapter = load_json(args.adapter)
+            validate_registry(registry, hosts)
+            observed_authority_signal = next(
+                (
+                    signal
+                    for signal in collect_authority_signals(
+                        registry, hosts, adapter
+                    )
+                    if signal.get("repository_id")
+                    == result_payload.get("repository_id")
+                ),
+                None,
+            )
+            if args.dry_run:
+                scheduler_state = load_scheduler_state(args.scheduler_state)
+                missions = load_missions(args.missions_dir)
+                frontier_state = load_frontier_state(
+                    args.frontier_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in missions
+                        if isinstance(item, dict)
+                    ),
+                )
+                portfolio = load_json(args.portfolio)
+                result = apply_external_result_transaction(
+                    scheduler_state,
+                    frontier_state,
+                    missions,
+                    portfolio,
+                    args.action_id,
+                    result_payload,
+                    observed_authority_signal=observed_authority_signal,
+                    coordinator_state=coordinator_state,
+                    actor_task_id=actor_task_id,
+                )
+            else:
+                result = apply_external_result_transaction_files(
+                    scheduler_path=args.scheduler_state,
+                    frontier_path=args.frontier_state,
+                    missions_dir=args.missions_dir,
+                    portfolio_path=args.portfolio,
+                    journal_dir=args.journal_dir,
+                    action_id=args.action_id,
+                    result=result_payload,
+                    observed_authority_signal=observed_authority_signal,
+                    coordinator_path=args.coordinator_state,
+                    actor_task_id=actor_task_id,
+                )
             result["dry_run"] = bool(args.dry_run)
             _json_stdout(result)
             return 0

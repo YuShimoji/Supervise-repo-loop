@@ -225,3 +225,20 @@
   without creating two live writers or silently pointing recovery at a task
   on another machine. Git reflection remains distinct from in-flight live-state
   migration.
+
+## D-021 — Require a monotonic artifact frontier before semantic promotion
+
+- Date: 2026-08-02
+- Corrects: delivery acknowledgement as external-action completion, timestamp-
+  ordered Mission inference, and schema-v2 portfolio rows without an
+  artifact-bound current-frontier certificate.
+- Decision: maintain one epoch-CAS FrontierRecord per repository/lane; enforce
+  `human > supervisor > worker > repo_observation > coordinator`; retain
+  rejected/superseded/parked artifacts as tombstones; bind external results to
+  exact thread/turn/message/result and branch/HEAD authority high water; update
+  frontier, Mission, scheduler action, and portfolio v3 only through the
+  replayable result transaction. Legacy lineage remains `legacy_unverified`.
+- Effect: stale evidence can be transported or quarantined but cannot become
+  the next ordinary Mission, user review card, generic successor, or current
+  portfolio artifact. Missing certificates activate
+  `TRANSPORT_ONLY_RECONCILIATION` rather than guessing current state.

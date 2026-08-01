@@ -7,6 +7,9 @@
     "classification",
     "primary_writer_task_id",
     "state_fingerprint",
+    "frontier_revision",
+    "frontier_safety_mode",
+    "frontier_gate",
     "scheduler_claim",
     "ready_actions",
     "required_handoff_actions",
@@ -32,6 +35,12 @@
     "classification": {"const": "COORDINATOR_DETERMINISTIC_PLAN"},
     "primary_writer_task_id": {"type": "string", "minLength": 1},
     "state_fingerprint": {"type": "string", "minLength": 64},
+    "frontier_revision": {"type": ["integer", "null"], "minimum": 0},
+    "frontier_safety_mode": {
+      "type": ["string", "null"],
+      "enum": ["TRANSPORT_ONLY_RECONCILIATION", "FRONTIER_VERIFIED", null]
+    },
+    "frontier_gate": {"type": "array", "items": {"type": "object"}},
     "scheduler_claim": {"type": ["object", "null"]},
     "ready_actions": {
       "type": "array",

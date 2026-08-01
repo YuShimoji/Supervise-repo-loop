@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/frontier-state.v1",
+  "title": "Monotonic artifact frontier ledger v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "revision",
+    "safety_mode",
+    "records",
+    "events",
+    "repository_status",
+    "retired_artifacts",
+    "applied_results",
+    "quarantined_results",
+    "failed_results"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "revision": {"type": "integer", "minimum": 0},
+    "safety_mode": {"enum": ["TRANSPORT_ONLY_RECONCILIATION", "FRONTIER_VERIFIED"]},
+    "records": {
+      "type": "object",
+      "additionalProperties": {"$ref": "frontier-record.v1.schema.json"}
+    },
+    "events": {
+      "type": "array",
+      "items": {"$ref": "frontier-record.v1.schema.json"}
+    },
+    "repository_status": {
+      "type": "object",
+      "additionalProperties": {"enum": ["legacy_unverified", "reconciliation_required", "verified"]}
+    },
+    "retired_artifacts": {"type": "array", "items": {"type": "object"}},
+    "applied_results": {"type": "array", "items": {"type": "object"}},
+    "quarantined_results": {"type": "array", "items": {"type": "object"}},
+    "failed_results": {"type": "array", "items": {"type": "object"}}
+  },
+  "additionalProperties": false
+}

@@ -4,7 +4,7 @@
 
 The Coordinator maintains two projections of the same deterministic plan:
 
-- `state/coordinator-current-status.v1.json` for schema-v2 machine readback;
+- `state/coordinator-current-status.v1.json` for schema-v3 machine readback;
 - `state/coordinator-current-status.md` for the user.
 
 The filename remains stable so live links do not break. The JSON object's
@@ -25,10 +25,13 @@ that fingerprint.
 python scripts/supervise_repo_loop.py portfolio-render
 ```
 
-The command reads the live scheduler state by default. It validates the v2
-stop/progress fields, scheduler revision, concurrency, active-route count, and
-the exact structured route identities before atomically rewriting only the
-Markdown projection. A stale JSON source fails before output is changed.
+The command reads the live scheduler and frontier ledgers by default. It
+validates the stop/progress fields, scheduler revision, concurrency,
+active-route count, exact structured route identities, semantic fingerprint,
+frontier revision, and every repository certificate before atomically
+rewriting only the Markdown projection. Schema v2 remains readable only for
+migration; it is not publishable as a current frontier. A stale JSON source
+fails before output is changed.
 
 The top-level `active_routes` array contains the repository, action, exact
 recipient, recipient transport/observer, delivery token, cursor, and status for
@@ -52,6 +55,8 @@ Mission. Each row contains:
 - unblock, reselection, or completion condition;
 - whether the user can or must act;
 - artifact, Worker Report, and Supervisor verdict links when available;
+- frontier status, epoch/event, disposition, source actor, branch/HEAD,
+  authority fingerprint, and exact active artifact certificate;
 - a seven-stage progress position: Mission, Work Order, Worker, Worker Report,
   Supervisor, Verdict, and Next Route;
 - a roadmap position with the overall position, current block, completed
@@ -135,6 +140,7 @@ Allowed states are:
 
 ```text
 RECEIVED
+DELIVERY_ACKNOWLEDGED
 ROUTED
 ADOPTED
 DEFERRED
@@ -143,9 +149,11 @@ NEEDS_CLARIFICATION
 SUPERSEDED
 ```
 
-Receipt is not adoption. A question may end with an answer report instead of a
-Mission. A direction change may be superseded by a later input without erasing
-the earlier audit record.
+Receipt and delivery acknowledgement are not adoption or routing completion.
+The pending input remains pending until an exact Supervisor result is validated
+and applied with its frontier event. A question may end with an answer report
+instead of a Mission. A direction change may be superseded by a later input
+without erasing the earlier audit record.
 
 ## Presentation
 

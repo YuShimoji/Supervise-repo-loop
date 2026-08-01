@@ -46,6 +46,34 @@ def lease_repository_id(lease: dict) -> str:
     )
 
 
+def mark_semantic_result_applied(
+    scheduler: dict, action_id: str, result_id: str
+) -> dict:
+    lease = next(
+        item for item in scheduler["route_leases"] if item["action_id"] == action_id
+    )
+    for state in (
+        "result_received",
+        "result_parsed",
+        "result_validated",
+        "result_applied",
+    ):
+        loop._set_external_lifecycle(  # noqa: SLF001 - scheduler unit boundary
+            lease, state, details={"result_id": result_id}
+        )
+    return {
+        "result_id": result_id,
+        "source_thread_id": lease["recipient_thread_id"],
+        "source_turn_id": f"turn-{result_id}",
+        "source_message_id": f"message-{result_id}",
+        "disposition": "accepted",
+        "frontier_event_id": f"frontier-{result_id}",
+        "frontier_epoch": 1,
+        "authority_fingerprint": "f" * 64,
+        "result_sha256": loop.sha256_text(result_id),
+    }
+
+
 def register_repository(
     registry: dict,
     hosts: dict,
@@ -388,11 +416,14 @@ class SchedulerRouteLeaseV2Tests(unittest.TestCase):
             scheduler, second, digest_character="b", cursor="cursor-b"
         )
 
+        result_evidence = mark_semantic_result_applied(
+            scheduler, sent_b["action_id"], "worker-b-result"
+        )
         loop.complete_coordinator_action(
             scheduler,
             sent_b["action_id"],
             "accepted",
-            evidence="worker-b-result",
+            evidence=result_evidence,
         )
 
         self.assertEqual(
@@ -557,18 +588,21 @@ class SchedulerRouteLeaseV2Tests(unittest.TestCase):
         sent = claim_prepare_send(
             scheduler, first, digest_character="a", cursor="cursor-a"
         )
+        result_evidence = mark_semantic_result_applied(
+            scheduler, sent["action_id"], "worker-a-result"
+        )
         loop.complete_coordinator_action(
             scheduler,
             sent["action_id"],
             "accepted",
-            evidence="worker-a-result",
+            evidence=result_evidence,
         )
         completed_revision = scheduler["revision"]
         duplicate_complete = loop.complete_coordinator_action(
             scheduler,
             sent["action_id"],
             "accepted",
-            evidence="worker-a-result",
+            evidence=result_evidence,
         )
         self.assertTrue(duplicate_complete["deduplicated"])
         self.assertEqual(scheduler["revision"], completed_revision)
@@ -766,11 +800,14 @@ class SchedulerRouteLeaseV2Tests(unittest.TestCase):
             scheduler["round_robin_cursor_repository_id"],
             repository_ids[2],
         )
+        result_evidence = mark_semantic_result_applied(
+            scheduler, sent[0]["action_id"], "repository-a-result"
+        )
         loop.complete_coordinator_action(
             scheduler,
             sent[0]["action_id"],
             "accepted",
-            evidence="repository-a-result",
+            evidence=result_evidence,
         )
 
         # A has immediately produced a successor at the same priority. D was

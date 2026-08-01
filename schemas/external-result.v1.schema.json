@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/external-result.v1",
+  "title": "Exact external semantic result v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "result_id",
+    "action_id",
+    "repository_id",
+    "lane_id",
+    "source_actor",
+    "source_thread_id",
+    "source_turn_id",
+    "source_message_id",
+    "disposition",
+    "based_on_frontier_epoch",
+    "frontier_event",
+    "authority_signal",
+    "mission_id",
+    "attempt_id",
+    "mission_before_sha256",
+    "mission_after"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "result_id": {"type": "string", "minLength": 1},
+    "action_id": {"type": "string", "minLength": 1},
+    "repository_id": {"type": "string", "minLength": 1},
+    "lane_id": {"type": "string", "minLength": 1},
+    "source_actor": {
+      "enum": ["human", "supervisor", "worker", "repo_observation", "coordinator"]
+    },
+    "source_thread_id": {"type": "string", "minLength": 1},
+    "source_turn_id": {"type": "string", "minLength": 1},
+    "source_message_id": {"type": "string", "minLength": 1},
+    "disposition": {
+      "enum": ["active", "accepted", "rejected", "superseded", "parked", "none"]
+    },
+    "based_on_frontier_epoch": {"type": "integer", "minimum": 0},
+    "frontier_event": {"$ref": "frontier-record.v1.schema.json"},
+    "authority_signal": {
+      "type": "object",
+      "required": ["repository_id", "root", "sources", "authority_watch_configured", "authority_fingerprint", "git", "high_water_marks"],
+      "properties": {
+        "repository_id": {"type": "string", "minLength": 1},
+        "root": {"type": "string", "minLength": 1},
+        "sources": {"type": "array"},
+        "authority_watch_configured": {"type": "boolean"},
+        "authority_fingerprint": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "git": {
+          "type": "object",
+          "required": ["status", "branch", "head_sha", "dirty", "dirty_paths"],
+          "properties": {
+            "status": {"const": "present"},
+            "branch": {"type": "string", "minLength": 1},
+            "head_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+            "dirty": {"type": "boolean"},
+            "dirty_paths": {"type": "array"}
+          },
+          "additionalProperties": true
+        },
+        "high_water_marks": {"type": "array"}
+      },
+      "additionalProperties": true
+    },
+    "mission_id": {"type": ["string", "null"], "minLength": 1},
+    "attempt_id": {"type": ["string", "integer", "null"]},
+    "mission_before_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$"},
+    "mission_after": {"type": ["object", "null"]},
+    "input_disposition": {
+      "enum": ["ADOPTED", "DEFERRED", "REJECTED", "NEEDS_CLARIFICATION", "SUPERSEDED"]
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/frontier-record.v1",
+  "title": "Artifact-bound repository frontier record v1",
+  "type": "object",
+  "required": [
+    "repository_id",
+    "lane_id",
+    "frontier_epoch",
+    "frontier_event_id",
+    "artifact_id",
+    "artifact_revision",
+    "artifact_sha256",
+    "branch",
+    "head_sha",
+    "disposition",
+    "source_actor",
+    "source_message_id",
+    "source_result_id",
+    "based_on_frontier_epoch",
+    "supersedes_event_ids",
+    "recorded_at"
+  ],
+  "properties": {
+    "repository_id": {"type": "string", "minLength": 1},
+    "lane_id": {"type": "string", "minLength": 1},
+    "frontier_epoch": {"type": "integer", "minimum": 1},
+    "frontier_event_id": {"type": "string", "minLength": 1},
+    "artifact_id": {"type": ["string", "null"], "minLength": 1},
+    "artifact_revision": {"type": ["string", "null"], "minLength": 1},
+    "artifact_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "branch": {"type": ["string", "null"], "minLength": 1},
+    "head_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-fA-F]{40}$"
+    },
+    "disposition": {
+      "enum": ["active", "accepted", "rejected", "superseded", "parked", "none"]
+    },
+    "source_actor": {
+      "enum": ["human", "supervisor", "worker", "repo_observation", "coordinator"]
+    },
+    "source_message_id": {"type": "string", "minLength": 1},
+    "source_result_id": {"type": "string", "minLength": 1},
+    "based_on_frontier_epoch": {"type": "integer", "minimum": 0},
+    "supersedes_event_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "recorded_at": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"disposition": {"const": "none"}}, "required": ["disposition"]},
+      "then": {
+        "properties": {
+          "artifact_id": {"type": "null"},
+          "artifact_revision": {"type": "null"},
+          "artifact_sha256": {"type": "null"}
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

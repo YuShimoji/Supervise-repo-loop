@@ -862,12 +862,33 @@ class AuthorizedRuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(waiting["poll_targets"][0]["observer_kind"], "chatgpt_poll")
         self.assertNotIn("host_id", waiting["poll_targets"][0])
         self.assertEqual(len(waiting["active_routes"]), 1)
+        lease = scheduler["route_leases"][0]
+        for lifecycle_state in (
+            "result_received",
+            "result_parsed",
+            "result_validated",
+            "result_applied",
+        ):
+            loop._set_external_lifecycle(  # noqa: SLF001 - scheduler observer unit
+                lease, lifecycle_state, details={"result_id": "answer-1"}
+            )
+        result_evidence = {
+            "result_id": "answer-1",
+            "source_thread_id": lease["recipient_thread_id"],
+            "source_turn_id": "turn-answer-1",
+            "source_message_id": "message-answer-1",
+            "disposition": "accepted",
+            "frontier_event_id": "frontier-answer-1",
+            "frontier_epoch": 1,
+            "authority_fingerprint": "f" * 64,
+            "result_sha256": loop.sha256_text("answer-1"),
+        }
         loop.complete_coordinator_action(
-            scheduler, action["action_id"], "answered", evidence="answer.json"
+            scheduler, action["action_id"], "answered", evidence=result_evidence
         )
         state_before = copy.deepcopy(scheduler)
         loop.complete_coordinator_action(
-            scheduler, action["action_id"], "answered", evidence="answer.json"
+            scheduler, action["action_id"], "answered", evidence=result_evidence
         )
         self.assertEqual(scheduler, state_before)
 

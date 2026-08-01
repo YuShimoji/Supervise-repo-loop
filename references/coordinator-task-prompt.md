@@ -8,7 +8,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
 
 ```json
 {
-  "contract_version": 7,
+  "contract_version": 8,
   "writer": {
     "mode": "single_bound_primary_task",
     "actor_identity_source": "CODEX_THREAD_ID",
@@ -50,7 +50,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
   "status": {
     "json": "state/coordinator-current-status.v1.json",
     "markdown": "state/coordinator-current-status.md",
-    "schema_version": 2,
+    "schema_version": 3,
     "scope": "all_registered_repositories",
     "update_policy": "semantic_change_only",
     "renderer": "portfolio-render",
@@ -59,7 +59,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "roadmap_position_per_repository": true,
     "status_query": "consume_observed_results_and_drain_required_handoffs_before_answer",
     "checkpoint_consistency": {
-      "source": "same_scheduler_revision_and_active_route_set",
+      "source": "same_scheduler_and_frontier_revisions_and_active_route_set",
       "projection_order": "json_then_render_then_verify",
       "on_mismatch": "CHECKPOINT_FORBIDDEN"
     },
@@ -75,9 +75,26 @@ with the prose and reject a runtime that cannot expose the required plan fields.
       "input_route"
     ]
   },
+  "frontier": {
+    "ledger": "state/frontier-ledger.v1.json",
+    "journal": "state/frontier-transactions",
+    "certificate_required_for": [
+      "ordinary_mission_advance",
+      "generic_successor",
+      "discretionary_mission",
+      "review_card",
+      "portfolio_promotion"
+    ],
+    "authority_source": "independent_git_and_file_high_water_observation",
+    "external_result_application": "coordinator-action-apply-result",
+    "delivery_ack_is_result": false,
+    "historical_review": "explicit_exact_identity_review_only_without_frontier_mutation",
+    "temporary_safety_mode": "TRANSPORT_ONLY_RECONCILIATION"
+  },
   "input_lineage": {
     "states": [
       "RECEIVED",
+      "DELIVERY_ACKNOWLEDGED",
       "ROUTED",
       "ADOPTED",
       "DEFERRED",
@@ -157,6 +174,9 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "required_plan_fields": [
       "scheduler_claim",
       "primary_writer_task_id",
+      "frontier_revision",
+      "frontier_safety_mode",
+      "frontier_gate",
       "active_routes",
       "ready_actions",
       "required_handoff_actions",
@@ -185,7 +205,8 @@ for one project is never a global scheduler lock.
 Capability gate
 - Read the installed SKILL, protocol, scheduler contract, this Prompt, and the
   persisted Coordinator plan before acting.
-- Require scheduler schema v2 and the plan fields named in the JSON contract.
+- Require scheduler schema v2, frontier ledger v1, portfolio schema v3, and the
+  plan fields named in the JSON contract.
   For this Coordinator, also require concurrency_limit=3; the generic scheduler
   may support other configured values within its declared range.
   If any are absent, preserve existing delivery identities, report
@@ -214,13 +235,24 @@ Input control plane
 - Route review replies to the exact Mission Supervisor. Route questions and
   direction changes to the named project's exact Supervisor, never directly to
   a Worker. If only the project target is ambiguous, ask only for that target.
-- Track each input through RECEIVED, ROUTED, and one Supervisor disposition:
-  ADOPTED, DEFERRED, REJECTED, NEEDS_CLARIFICATION, or SUPERSEDED. Link the
+- Track each input through RECEIVED, DELIVERY_ACKNOWLEDGED, and one validated
+  Supervisor disposition: ADOPTED, DEFERRED, REJECTED, NEEDS_CLARIFICATION, or
+  SUPERSEDED. Delivery does not advance the Mission or mark the input ROUTED;
+  only result application may record the semantic route/disposition. Link the
   decision evidence and any resulting Mission or report.
 - A pending input parks only its exact scope. It never suppresses another
   project's ready action.
 
 Portfolio scheduling pass
+- Start from the frontier gate. Missing, stale, rejected, superseded, parked,
+  historical, or self-declared authority evidence permits only exact transport,
+  result application, and reconciliation for that repository/lane. Do not
+  create a generic successor, discretionary Mission, review card, or promoted
+  portfolio row until a current FrontierCertificate exists.
+- A historical review is the only narrow exception: `present_user_card` must set
+  `historical_review=true` and bind the exact retired artifact ID, revision, and
+  SHA-256. Keep the certificate bound to the current frontier and never mutate
+  or re-promote the retired record from that review action.
 - Recompute the one deterministic Coordinator plan after every persisted
   semantic result. Status, selection, recovery, and presentation must consume
   that same plan and revision.
@@ -279,7 +311,9 @@ Waiting and turn budget
   ChatGPT Supervisor in `poll_targets` once with `read_thread`; never pass a
   ChatGPT chat ID to `wait_threads`. Then wait once on the Codex Worker tasks in
   `wait_targets`, using current host IDs and cursors. Process the first
-  semantic result, persist only that route's result, then recompute the plan.
+  semantic result, apply it with `coordinator-action-apply-result`, then
+  recompute the plan. Do not call `coordinator-action-complete` from a delivery
+  ACK, token, cursor, or non-empty evidence string.
   A Supervisor result found by the initial poll is consumed before waiting.
 - Do not repeatedly wait on one exact task while unrelated capacity or READY
   work exists. Do not treat commentary, an active flag, or an unchanged
@@ -320,19 +354,21 @@ Durable portfolio index
   fingerprint changes; do not use timestamps alone as change. Route-set,
   route-state, input-disposition, and next-owner changes are semantic changes
   even when project artifacts are unchanged.
-- Write JSON schema version 2 first, then generate Markdown with the
+- Write JSON schema version 3 first, then generate Markdown with the
   deterministic `portfolio-render` command. Do not hand-maintain a divergent
   table. Both files contain the same seven-stage path: Mission, Work Order,
   Worker, Worker Report, Supervisor, Verdict, Next Route.
 - Before any state-changing response or explicit status answer can checkpoint,
-  verify against the scheduler file read for that response: exact
-  `scheduler_revision`, `concurrency_limit`, active-route count, and the full
+  verify against the scheduler and frontier files read for that response:
+  exact `scheduler_revision`, `frontier_revision`, safety mode,
+  FrontierCertificates, `concurrency_limit`, active-route count, and the full
   active route set (`repository_id`, `action_id`, recipient, delivery token,
   observer kind, cursor, and status). Persist that route set in `active_routes`. A missing,
-  stale, duplicate, or extra identity is `portfolio_scheduler_mismatch` and
+  stale, duplicate, or extra identity is a portfolio consistency mismatch and
   forbids the checkpoint; regenerate JSON, render Markdown, and verify again.
-  JSON and Markdown are each atomically replaced, but no cross-file atomic
-  transaction is claimed.
+  External result application uses its write-ahead reducer for frontier,
+  Mission, scheduler, and JSON portfolio convergence. Standalone Markdown
+  rendering remains a deterministic projection of the committed JSON.
 - Include every registered repository, even when it has no Mission. For each
   row show: project state, current Mission and attempt, why it is or is not
   running, route owner, last semantic evidence, exact next move, unblock or
@@ -427,6 +463,13 @@ At minimum prove:
     delayed;
 12. a stale portfolio revision or incomplete active-route set is rejected before
     rendering or a user checkpoint.
+13. delivery acknowledgement cannot complete an external-result action;
+14. a stale result is quarantined by frontier-epoch compare-and-swap and closes
+    without mutating the current frontier;
+15. a self-declared authority signal that differs from current Git/file
+    observation cannot issue a certificate or create work;
+16. interruption between result and portfolio persistence replays to one exact
+    applied frontier without a split-brain user-facing projection.
 
 The transition map and portfolio index are projections, not additional
 schedulers. Their state and resume anchors must come from the same deterministic

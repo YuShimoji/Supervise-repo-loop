@@ -73,7 +73,7 @@
             "enum": ["USER_DECISION", "USER_ACTION"]
           },
           "response_id": {"type": "string", "minLength": 1},
-          "response_state": {"enum": ["ready_to_route"]},
+          "response_state": {"enum": ["ready_to_route", "delivery_acknowledged"]},
           "priority": {"const": 1},
           "recipient_thread_id": {"type": "string", "minLength": 1},
           "packet": {"type": "object"},
@@ -99,7 +99,7 @@
           "repository_id": {"type": "string", "minLength": 1},
           "mission_id": {"type": ["string", "null"]},
           "raw_text": {"type": "string", "minLength": 1},
-          "state": {"const": "queued"},
+          "state": {"enum": ["queued", "delivery_acknowledged"]},
           "priority": {"enum": [1, 2]}
         },
         "additionalProperties": true

@@ -53,6 +53,16 @@ one-time gates, helper caches, and checkpoints remain local to their host; a
 receiving host recreates its bindings from the static contracts instead of
 copying the sending host's identities.
 
+The 2026-08-02 frontier-integrity correction addresses a separate control-plane
+regression: a transport acknowledgement or stale Coordinator summary could
+close an external action and re-promote an older artifact. Static source now
+has a per-repository/lane monotonic frontier ledger, source precedence,
+epoch-CAS external results, branch/HEAD and authority high-water certificates,
+portfolio schema v3, and `TRANSPORT_ONLY_RECONCILIATION`. Legacy live state is
+not inferred or rewritten by this repair lane; it remains
+`legacy_unverified` until the exact primary Coordinator performs a later
+authorized reconciliation.
+
 ## Final deliverable image
 
 The Coordinator always shows one actionable user card, continues safe READY
@@ -73,6 +83,12 @@ require behavior-level verification, not Prompt phrase checks.
 
 ## Acceptance state
 
+- 2026-08-02 frontier repair source checkpoint: implementation and synthetic
+  regression coverage are present on the isolated repair branch. Required
+  live product repositories and installed live `state/` were not mutated.
+  Static review, complete source tests, commit/push, and a later primary-owned
+  live migration remain distinct gates; no current product artifact is claimed
+  from the former schema-v2 portfolio.
 - 2026-08-02 cross-host static checkpoint: the 47-file allowlist passed SHA-256
   source/installed parity and all 151 tests passed in both copies. The
   portability contract keeps the recovery heartbeat prompt portable but makes

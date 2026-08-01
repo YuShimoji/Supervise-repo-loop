@@ -32,6 +32,11 @@
       "status": "active"
     },
     {
+      "id": "monotonic-frontier-reconciliation",
+      "path": "docs/frontier-reconciliation.md",
+      "status": "active"
+    },
+    {
       "id": "authorized-runtime-recovery-actions",
       "path": "docs/authorized-runtime-recovery.md",
       "status": "active"
@@ -74,6 +79,26 @@
     {
       "id": "coordinator-portfolio-v2",
       "path": "schemas/coordinator-portfolio.v2.schema.json",
+      "status": "compatibility"
+    },
+    {
+      "id": "frontier-record-v1",
+      "path": "schemas/frontier-record.v1.schema.json",
+      "status": "active"
+    },
+    {
+      "id": "frontier-state-v1",
+      "path": "schemas/frontier-state.v1.schema.json",
+      "status": "active"
+    },
+    {
+      "id": "external-result-v1",
+      "path": "schemas/external-result.v1.schema.json",
+      "status": "active"
+    },
+    {
+      "id": "coordinator-portfolio-v3",
+      "path": "schemas/coordinator-portfolio.v3.schema.json",
       "status": "active"
     },
     {

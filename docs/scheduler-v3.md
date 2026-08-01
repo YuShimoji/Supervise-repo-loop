@@ -15,6 +15,13 @@ The three independent runtime axes are:
 - execution: `READY | DRAINING | WAITING_USER | WAITING_EXTERNAL | IDLE`;
 - recovery automation: `ARMED | PAUSED`.
 
+A fourth integrity gate is orthogonal to those axes: artifact frontier
+certification. Missing legacy lineage or a stale branch/HEAD/authority binding
+activates `TRANSPORT_ONLY_RECONCILIATION`. Existing exact transport and
+frontier reconciliation continue, but the scheduler does not admit ordinary
+Mission work, generic successors, review presentation, or portfolio promotion.
+See [frontier-reconciliation.md](frontier-reconciliation.md).
+
 `AVAILABLE` does not mean work is in flight. `READY` means a deterministic
 action exists but has not been claimed; only `DRAINING` means the Coordinator
 has begun an exact action or is waiting on an exact route. `IDLE` is a quiet
@@ -52,6 +59,11 @@ set. Any difference in revision, capacity, count, repository, action,
 recipient, token, cursor, or route status makes the checkpoint invalid. Route
 admission and release are semantic changes even if repository artifacts do not
 change.
+
+Transport acknowledgement is not completion. External routes retain the
+action through `delivery_acknowledged` and close only after the exact result is
+parsed, validated against its frontier epoch, applied to the Mission/frontier
+reducer, and projected to portfolio v3 as `result_applied`.
 
 ## Single-writer boundary
 
@@ -148,8 +160,9 @@ ready action
 → prepare durable delivery envelope
 → exact send receipt / wait cursor
 → repository route lease + scheduler release
-→ persisted result or presentation evidence
-→ complete that exact lease
+→ optional delivery acknowledgement (transport only)
+→ exact semantic result validation + frontier compare-and-swap
+→ atomic result_applied transition closes that exact lease
 ```
 
 Use:
@@ -159,8 +172,13 @@ coordinator-plan
 coordinator-action-claim --action-id ...
 coordinator-action-prepare --action-id ... --recipient-thread-id ... --packet-sha256 ...
 coordinator-action-sent --action-id ... --recipient-thread-id ...
-coordinator-action-complete --action-id ... --outcome ...
+coordinator-action-delivery-ack --action-id ... --delivery-ack-id ...
+coordinator-action-apply-result --action-id ... --result ...
 ```
+
+`coordinator-action-complete` remains the local/presentation completion path.
+It cannot complete an action with `requires_external_result=true` before the
+result reducer has reached `result_applied`.
 
 If work fails before a delivery envelope is prepared, use
 `coordinator-action-release`; this clears the unprepared scheduler claim
@@ -171,7 +189,9 @@ recipient, and cursor instead. Never mark a retryable failure complete.
 
 An outbound route is in flight only after the exact recipient is persisted as
 `sent` or `waiting`, together with the packet SHA-256. External-result actions
-cannot complete before this receipt and require result evidence when completed.
+cannot complete from that receipt or a delivery acknowledgement. They require
+the exact semantic result, current independently observed authority signal,
+frontier epoch compare-and-swap, and write-ahead result application.
 A local `WORK_ORDER_RECEIVED` transition is ready work,
 not in-flight work. Historical v2 outbound Mission states remain readable as
 legacy inferred routes, but all new sends use a claim receipt.

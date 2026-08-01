@@ -53,7 +53,13 @@ Mission. Each row contains:
 - whether the user can or must act;
 - artifact, Worker Report, and Supervisor verdict links when available;
 - a seven-stage progress position: Mission, Work Order, Worker, Worker Report,
-  Supervisor, Verdict, and Next Route.
+  Supervisor, Verdict, and Next Route;
+- a roadmap position with the overall position, current block, completed
+  blocks, next blocks, next gate, and explicit project completion definition.
+
+The roadmap position uses named blocks and gates, not a guessed completion
+percentage. It shows where the current slice sits in the known project process
+without implying acceptance for unfinished owner gates.
 
 Use only:
 
@@ -112,6 +118,14 @@ user/review waits and policy parks in amber, and only system blockers in red.
 
 ## User input and proposal lineage
 
+Top-level `next_user_action` is either `null` or the one complete card the user
+can act on now. When present it includes the exact project, decision/action
+kind, purpose, why now, entrypoint, every requirement, reply format, owner,
+post-reply behavior, and non-escalation boundary. Any `WAITING_USER` repository
+must have that card; the user never has to inspect another task or hidden state
+file for the missing instructions. Other user-waiting Missions remain parked
+until they become the one presented card.
+
 Every Coordinator input receives a durable receipt before routing. Its entry
 contains source turn/message identity, target repository and Mission when
 known, exact Supervisor recipient, current state, owner/rationale, decision
@@ -149,7 +163,8 @@ same plan revision used for execution.
 
 Acceptance requires behavior tests proving all registered repositories are
 present, Mission completion is not rendered as project completion, block rows
-are operationally actionable, input disposition and resulting work are linked,
-the graph is deterministically rendered from JSON, an observed Worker Report
-cannot remain unsent at a normal status checkpoint, and identical semantic
-state causes neither a rewrite nor a notification.
+are operationally actionable, one next-user card is complete, every row exposes
+its roadmap position, input disposition and resulting work are linked, the
+graph is deterministically rendered from JSON, an observed Worker Report cannot
+remain unsent at a normal status checkpoint, and identical semantic state
+causes neither a rewrite nor a notification.

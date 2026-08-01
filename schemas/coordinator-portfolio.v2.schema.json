@@ -12,6 +12,7 @@
     "active_route_count",
     "active_routes",
     "concurrency_limit",
+    "next_user_action",
     "repositories"
   ],
   "properties": {
@@ -31,6 +32,12 @@
       "items": {"$ref": "#/$defs/activeRoute"}
     },
     "concurrency_limit": {"type": "integer", "minimum": 1, "maximum": 8},
+    "next_user_action": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/userAction"}
+      ]
+    },
     "repositories": {
       "type": "array",
       "items": {"$ref": "#/$defs/repository"}
@@ -38,6 +45,64 @@
   },
   "additionalProperties": true,
   "$defs": {
+    "userAction": {
+      "type": "object",
+      "required": [
+        "repository_id",
+        "kind",
+        "purpose",
+        "why_now",
+        "entrypoint",
+        "requirements",
+        "reply_format",
+        "owner",
+        "post_reply_behavior",
+        "non_escalation_boundary"
+      ],
+      "properties": {
+        "repository_id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["USER_DECISION", "USER_ACTION"]},
+        "purpose": {"type": "string", "minLength": 1},
+        "why_now": {"type": "string", "minLength": 1},
+        "entrypoint": {"type": "string", "minLength": 1},
+        "requirements": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "reply_format": {"type": "string", "minLength": 1},
+        "owner": {"type": "string", "minLength": 1},
+        "post_reply_behavior": {"type": "string", "minLength": 1},
+        "non_escalation_boundary": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    },
+    "roadmap": {
+      "type": "object",
+      "required": [
+        "overall_position",
+        "current_block",
+        "completed_blocks",
+        "next_blocks",
+        "completion_definition",
+        "next_gate"
+      ],
+      "properties": {
+        "overall_position": {"type": "string", "minLength": 1},
+        "current_block": {"type": "string", "minLength": 1},
+        "completed_blocks": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "next_blocks": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "completion_definition": {"type": "string", "minLength": 1},
+        "next_gate": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    },
     "activeRoute": {
       "type": "object",
       "required": [
@@ -150,6 +215,7 @@
         "project_name",
         "state",
         "progress",
+        "roadmap",
         "why",
         "owner",
         "next_move"
@@ -183,6 +249,7 @@
           },
           "additionalProperties": true
         },
+        "roadmap": {"$ref": "#/$defs/roadmap"},
         "why": {"type": "string", "minLength": 1},
         "owner": {"type": "string", "minLength": 1},
         "next_move": {"type": "string", "minLength": 1},

@@ -261,6 +261,7 @@ class SchedulerRouteLeaseV2Tests(unittest.TestCase):
             recipient,
             packet_sha256=digest,
             after_cursor="legacy-cursor",
+            actor_task_id="primary-coordinator",
         )
         self.assertTrue(duplicate["deduplicated"])
         self.assertEqual(migrated["revision"], revision)

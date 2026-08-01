@@ -10,6 +10,10 @@
 - After durable state proves sufficient, consider rotating the very large
   historical Coordinator task to a fresh task to reduce ordinary interactive
   context cost. Task creation remains a separate user-authorized action.
+- If Codex later exposes a stable automation import API, add a host-local
+  installer that consumes `references/automation-portability.v1.json` but
+  still asks Codex to supply the new target task and local project identity.
+  Do not make task IDs or live state portable to enable that convenience.
 
 ## Rejected directions
 

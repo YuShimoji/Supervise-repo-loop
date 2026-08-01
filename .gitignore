@@ -1,5 +1,6 @@
 /state/
 /.serena/
+/.playwright-mcp/
 **/__pycache__/
 *.py[cod]
 .pytest_cache/

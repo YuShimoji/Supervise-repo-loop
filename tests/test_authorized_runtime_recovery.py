@@ -210,13 +210,10 @@ class AuthorizedRuntimeRecoveryTests(unittest.TestCase):
         )
         receipt["phase"] = "WORKER_PROBE_RESULT"
         receipt["probe_action_id"] = action["action_id"]
-        statuses = {
-            "probe_a_failed": ("failed", "not_started", "not_started", "not_started"),
-            "probe_b_failed": ("passed", "passed", "failed", "not_started"),
-            "runtime_doctor_failed": ("passed", "passed", "passed", "failed"),
-            "probe_passed": ("passed", "passed", "passed", "passed"),
-        }[outcome]
         contract = action["payload"]["probe_contract"]
+        statuses = contract["receipt_completion_required"]["status_matrix"][
+            outcome
+        ]
 
         def process_result(name: str, status: str) -> dict:
             if status == "not_started":
@@ -231,8 +228,8 @@ class AuthorizedRuntimeRecoveryTests(unittest.TestCase):
             }
             return result
 
-        receipt["probe_a"] = process_result("probe_a", statuses[0])
-        if statuses[1] == "passed":
+        receipt["probe_a"] = process_result("probe_a", statuses["probe_a"])
+        if statuses["postcheck"] == "passed":
             receipt["postcheck"] = {
                 "status": "passed",
                 "path": record["target_path"],
@@ -244,16 +241,16 @@ class AuthorizedRuntimeRecoveryTests(unittest.TestCase):
                 },
             }
         else:
-            receipt["postcheck"] = {"status": statuses[1]}
-        receipt["probe_b"] = process_result("probe_b", statuses[2])
+            receipt["postcheck"] = {"status": statuses["postcheck"]}
+        receipt["probe_b"] = process_result("probe_b", statuses["probe_b"])
         expected_doctor = action["payload"]["probe_contract"]["runtime_doctor"][
             "expected"
         ]
         receipt["runtime_doctor"] = {
-            "status": statuses[3],
+            "status": statuses["runtime_doctor"],
             "expected": expected_doctor,
         }
-        if statuses[3] == "failed":
+        if statuses["runtime_doctor"] == "failed":
             receipt["runtime_doctor"]["observed"] = {}
             receipt["runtime_doctor"]["error"] = "runtime doctor failed"
         if outcome == "probe_passed":
@@ -604,7 +601,18 @@ class AuthorizedRuntimeRecoveryTests(unittest.TestCase):
                 json.dumps(document, ensure_ascii=False, sort_keys=True),
                 encoding="utf-8",
             )
-        with mock.patch.object(loop, "DEFAULT_COORDINATOR_EVENTS", self.root):
+        with (
+            mock.patch.object(loop, "DEFAULT_COORDINATOR_EVENTS", self.root),
+            mock.patch.object(
+                loop, "DEFAULT_COORDINATOR_STATE", paths["coordinator"]
+            ),
+            mock.patch.object(loop, "DEFAULT_BINDINGS", paths["registry"]),
+            mock.patch.object(loop, "DEFAULT_HOSTS", paths["hosts"]),
+            mock.patch.object(loop, "DEFAULT_ADAPTER", paths["adapter"]),
+            mock.patch.object(
+                loop, "DEFAULT_SCHEDULER_STATE", paths["scheduler"]
+            ),
+        ):
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 exit_code = loop.main(
@@ -631,6 +639,29 @@ class AuthorizedRuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(record["phase"], "AUTHORIZED")
         self.assertEqual(record["worker_adapter_host_id"], "local")
         loop.validate_coordinator_state(persisted)
+
+    def test_T139_secondary_runtime_actor_cannot_use_primary_claim(self) -> None:
+        self.register()
+        scheduler = loop.default_scheduler_state()
+        action = self.claim(scheduler, "execute_authorized_runtime_repair")
+        owner = scheduler["scheduler_claim"]["owner_task_id"]
+        secondary = copy.deepcopy(self.coordinator)
+        secondary["coordinator_task"]["task_id"] = "secondary-repair-task"
+        before = self.target.read_bytes()
+        with self.assertRaisesRegex(
+            loop.ProtocolError, "COORDINATOR_WRITER_OWNERSHIP_MISMATCH"
+        ):
+            loop.execute_authorized_runtime_action(
+                secondary,
+                scheduler,
+                action["action_id"],
+                actor_task_id="secondary-repair-task",
+            )
+        self.assertEqual(scheduler["scheduler_claim"]["owner_task_id"], owner)
+        self.assertEqual(self.target.read_bytes(), before)
+        record = self.coordinator["authorized_runtime_actions"][0]
+        self.assertEqual(record["phase"], "AUTHORIZED")
+        self.assertFalse(Path(record["backup_path"]).exists())
 
     def test_T110_prepare_is_byte_exact_receipted_and_idempotent(self) -> None:
         scheduler = loop.default_scheduler_state()
@@ -719,6 +750,19 @@ class AuthorizedRuntimeRecoveryTests(unittest.TestCase):
             doctor["ymm4_version"],
             "4.54.0.1+76b177dd451f9d162816dabc4ac658180e869582",
         )
+        status_matrix = probe["payload"]["probe_contract"][
+            "receipt_completion_required"
+        ]["status_matrix"]
+        self.assertEqual(
+            status_matrix["probe_a_failed"],
+            {
+                "probe_a": "failed",
+                "postcheck": "not_started",
+                "probe_b": "not_started",
+                "runtime_doctor": "not_started",
+            },
+        )
+        self.assertEqual(status_matrix, loop.AUTHORIZED_RUNTIME_PROBE_STATUS_MATRIX)
         self.send_external(scheduler, probe)
         evidence = self.write_probe_receipt(record, probe, "probe_a_failed")
         worker_receipt = json.loads(evidence.read_text(encoding="utf-8"))

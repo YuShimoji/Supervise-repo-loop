@@ -83,3 +83,27 @@ same Coordinator task to reread the installed `SKILL.md`, referenced protocol
 documents, and `references/coordinator-task-prompt.md`. Do not reset its live
 state to force a reload.
 
+## Cross-host development
+
+Use [host-portability.md](host-portability.md) when moving development to
+another computer. The repository is the portable source; the installed
+`state/`, Codex automation IDs, primary task binding, local gate/helper paths,
+and automation checkpoints are host-local. They must not be copied through
+Git or inferred from an old machine.
+
+After cloning, run the read-only host check before installation:
+
+```powershell
+.\scripts\verify-portable-checkout.ps1
+```
+
+After static installation and after the branch has been pushed, use the
+stronger gate:
+
+```powershell
+.\scripts\verify-portable-checkout.ps1 -RequireInstalledParity -RequireClean -VerifyRemoteTip
+```
+
+The second command proves only source/install parity and exact branch
+reflection. It does not prove that a recovery heartbeat is correctly bound or
+that a live Coordinator route can move between hosts.

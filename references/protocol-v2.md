@@ -11,6 +11,9 @@ Mission packets contain only deltas.
 - Persistent Codex Worker performs repository work and never self-adjudicates.
 - User writes only in the Coordinator and receives only Supervisor-confirmed
   terminal decisions and actions there.
+- The active `coordinator_state.coordinator_task.task_id` is the sole live-state
+  writer. Repair, audit, reporting, and development tasks are read-only unless
+  they are that exact bound task.
 
 ## Repository safety
 
@@ -64,6 +67,35 @@ Mission packets contain only deltas.
   `review_policy.depth` for `light`, `standard`, or `deep` review. Depth never
   broadens the parking scope.
 
+## Mission admission
+
+- Mandatory result consumption and exact protocol handoffs precede all
+  discretionary Mission selection.
+- A new or continued Mission must cite the current repository authority source,
+  revision, fingerprint, and `current_next_action`, then state a concrete
+  `gate_delta`. The deliverable must directly advance that exact gate or make
+  the current artifact usable by its named next consumer.
+- Prefer finishing or reusing an existing artifact. Creating another source,
+  story, genre, form, benchmark, or candidate requires evidence that the
+  current artifact cannot supply the named gate delta and that the new artifact
+  is the smallest viable route.
+- The default work class is a one-turn quick win, with two Worker turns as the
+  bounded maximum. Non-quick work must explain why a smaller slice cannot
+  produce usable value.
+- Any new artifact, source, story, form, or candidate—and every genre/domain
+  shift, exploratory Mission, parallel product direction, or strategic bet—is
+  ineligible without exact explicit user authorization evidence. “Use a
+  different topic to prove generalization” is not authorization or a value path
+  by itself.
+- Missing or invalid value evidence produces `MISSION_VALUE_GATE`: request a
+  smaller aligned Work Order, return `NO_WORK`, or park the proposal. Do not
+  dispatch and do not let a completed legacy Mission grandfather its successor.
+- An existing legacy Mission at an otherwise advanceable or dispatchable state
+  projects `resolve_mission_value_gate` to its exact Supervisor instead of a
+  Worker action. A valid contract may be attached once with the replay-safe
+  `value_contract_admitted` event; an admitted contract is immutable. The only
+  other resolutions are `NO_WORK` or parking the Mission.
+
 ## Coordinator lifecycle
 
 - Codex turns are deterministic claim-drains, not the Coordinator lifetime.
@@ -72,6 +104,18 @@ Mission packets contain only deltas.
   checkpoint, not Coordinator completion.
 - `coordinator-status`, generic next-action resolution, and recovery use the
   same scheduler plan and action ID.
+- Every live mutation uses the canonical Coordinator, scheduler, Mission/event,
+  and portfolio paths under the installed skill `state/`. A state clone or an
+  alternate caller-supplied path is test-only and cannot authorize writes to
+  canonical live state.
+- Before mutation, require the process `CODEX_THREAD_ID` to equal the active
+  bound Coordinator task ID. Never copy or rewrite that identity on behalf of a
+  second task. This is a cooperative same-user safety fence, not protection
+  against a deliberately hostile full-access process.
+- Primary rebinding is a separate explicit administrator action. Permit it only
+  at a verified idle edge with no scheduler claim, prepared delivery, route
+  lease, or recovery-owned runtime phase, and persist old/new identity plus its
+  authority. Audit, repair, and recovery paths cannot rebind implicitly.
 - A normal status/list/why-stopped request first inspects each exact route once
   with its persisted observer: `read_thread` for a ChatGPT Supervisor and
   `wait_threads` only for Codex Workers. An already-arrived result is consumed and its mandatory protocol
@@ -171,8 +215,14 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
   Mermaid path: Mission -> Work Order -> Worker -> Worker Report -> Supervisor
   -> Verdict -> Next Route.
 - Every project marks its exact current stage, reason, owner, and next move.
+  It also marks overall roadmap position, current/completed/next blocks, next
+  gate, and the project's completion definition without inventing a percentage.
   Waiting rows expose the full recovery contract. A file link alone is not a
   graphical progress answer.
+- The top-level next user action is exactly one complete card or explicit
+  `null`. The card includes project, kind, purpose, why now, entrypoint, every
+  requirement, reply format, owner, post-reply behavior, and non-escalation
+  boundary. A `WAITING_USER` row without that card is not publishable.
 
 ## State separation
 

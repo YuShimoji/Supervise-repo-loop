@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -174,8 +175,46 @@ def fixture(*, include_workers: bool = True) -> tuple[dict, dict, dict, dict]:
         "active_repository_selector": None,
         "pending_repository_ids": [],
         "pending_user_responses": [],
+        "authorized_runtime_actions": [],
+        "coordinator_task": {
+            "scope": "all_repositories",
+            "task_id": os.environ.get(
+                "CODEX_THREAD_ID", "test-primary-coordinator"
+            ),
+            "binding_status": "active",
+        },
     }
     return registry, hosts, adapter, coordinator
+
+
+def fixture_value_contract() -> dict:
+    return {
+        "contract_version": 1,
+        "authority_source": "docs/CURRENT_HANDOFF.md",
+        "authority_revision": "fixture-revision",
+        "authority_fingerprint": "f" * 64,
+        "authority_next_action": "Advance the existing fixture artifact.",
+        "north_star": "Exercise deterministic Coordinator routing.",
+        "current_bottleneck": "The existing fixture action has not run.",
+        "current_gate": "Existing fixture action is pending.",
+        "gate_delta": "Move the existing fixture action to its next state.",
+        "expected_authority_state_after": "Existing fixture action is complete.",
+        "expected_user_value": "The current fixture path is exercised.",
+        "smallest_deliverable": "One existing fixture transition.",
+        "next_consumer": "The deterministic scheduler assertion.",
+        "reuse_or_integration": "Reuse the existing fixture Mission.",
+        "existing_artifact_reused": True,
+        "creates_new_artifact": False,
+        "new_source_story_form_or_candidate": False,
+        "advances_current_next_action": True,
+        "adoption_test": "The expected scheduler action is selected.",
+        "kill_condition": "Stop if a new artifact would be needed.",
+        "objective_fit": "direct",
+        "work_class": "quick_win",
+        "max_worker_turns": 1,
+        "genre_or_domain_shift": False,
+        "out_of_scope": ["new artifacts"],
+    }
 
 
 def mission(
@@ -185,9 +224,10 @@ def mission(
     mission_id: str,
     priority: str = "ordinary",
     lane: str = "default",
+    include_value_contract: bool = True,
 ) -> dict:
     suffix = repository_id.rsplit("/", 1)[-1]
-    return {
+    item = {
         "schema_version": 2,
         "repository_id": repository_id,
         "launch_set_id": "global-coordinator",
@@ -209,6 +249,9 @@ def mission(
         "priority": priority,
         "events": [],
     }
+    if include_value_contract:
+        item["value_contract"] = fixture_value_contract()
+    return item
 
 
 def review_card(project_name: str = "Context A") -> dict:
@@ -1275,6 +1318,8 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                             "a" * 64,
                             "--scheduler-state",
                             str(paths["scheduler"]),
+                            "--coordinator-state",
+                            str(paths["coordinator"]),
                         ]
                     ),
                     0,
@@ -1293,6 +1338,8 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                             "cursor-1",
                             "--scheduler-state",
                             str(paths["scheduler"]),
+                            "--coordinator-state",
+                            str(paths["coordinator"]),
                         ]
                     ),
                     0,
@@ -1321,6 +1368,8 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                             "receipt-1",
                             "--scheduler-state",
                             str(paths["scheduler"]),
+                            "--coordinator-state",
+                            str(paths["coordinator"]),
                         ]
                     ),
                     0,
@@ -1629,7 +1678,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             "the Coordinator prompt must have one unambiguous JSON contract",
         )
         contract = json.loads(encoded_contracts[0])
-        self.assertEqual(contract["contract_version"], 5)
+        self.assertEqual(contract["contract_version"], 7)
 
         self.assertEqual(
             contract["scheduler"],
@@ -1681,6 +1730,10 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             contract["status"]["graph"], "mermaid_inline_and_markdown_index"
         )
+        self.assertEqual(
+            contract["status"]["next_user_action"], "one_complete_card_or_null"
+        )
+        self.assertTrue(contract["status"]["roadmap_position_per_repository"])
         self.assertEqual(
             contract["status"]["status_query"],
             "consume_observed_results_and_drain_required_handoffs_before_answer",
@@ -1750,6 +1803,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 "required_scheduler_schema": 2,
                 "required_plan_fields": [
                     "scheduler_claim",
+                    "primary_writer_task_id",
                     "active_routes",
                     "ready_actions",
                     "required_handoff_actions",
@@ -1765,6 +1819,14 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 "on_missing": "MIGRATION_REQUIRED",
                 "forbid_capability_overclaim": True,
             },
+        )
+        self.assertEqual(
+            contract["mission_admission"]["legacy_uncontracted_action"],
+            "resolve_mission_value_gate",
+        )
+        self.assertEqual(
+            contract["mission_admission"]["legacy_contract_admission_event"],
+            "value_contract_admitted",
         )
 
         # These phrases encode the old single-route monopoly and must not

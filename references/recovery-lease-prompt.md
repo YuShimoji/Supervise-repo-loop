@@ -11,6 +11,16 @@ schema v2. This wake exists only because the previous foreground pass ended
 with a durable prepared delivery, repository route lease, or a recovery-owned
 typed runtime phase.
 
+Before step 1, verify that this wake is attached to the exact active primary
+Coordinator task, the process CODEX_THREAD_ID equals
+coordinator_state.coordinator_task.task_id, and every live-state argument is
+the canonical path under the installed skill state directory. This automation
+has no writer identity of its own: it may wake the bound primary but may not
+claim as an automation, repair, audit, or substitute task. On any identity or
+path mismatch, make no live mutation and return DONT_NOTIFY. Never copy the
+primary ID or perform a primary rebind; rebinding is a separate explicit idle-
+only administrator operation.
+
 1. Run the deterministic coordinator-plan once.
 2. Use plan.watchdog_should_be_armed as the only arm gate. If it is false,
    pause this automation immediately and return DONT_NOTIFY. Do not inspect
@@ -26,10 +36,10 @@ typed runtime phase.
    ChatGPT chat ID to wait_threads. Build one wait_threads request only from
    the Codex Worker entries in plan.wait_targets, deduplicated by exact host,
    task, and cursor. Consume a semantic Supervisor result before waiting;
-   otherwise use one immediate or bounded Worker snapshot and process only the
-   first target that completes or needs attention. If an existing route has no
-   cursor, use the matching transport observer to attach the returned cursor
-   to the same token/hash lease before any checkpoint.
+   otherwise use exactly one immediate or bounded Worker snapshot and process
+   only the first target that completes or needs attention. If an existing
+   route has no cursor, use the matching transport observer to attach the
+   returned cursor to the same token/hash lease before any checkpoint.
 5. If every target is unchanged, persist no semantic state, emit no status or
    progress message, keep only the existing route leases, and return
    DONT_NOTIFY. Do not loop inside this wake.
@@ -56,6 +66,8 @@ typed runtime phase.
 
 This lease never owns an independent status calculation. The primary Prompt
 owns the canonical portfolio index and user-facing semantic transition output.
+The CODEX_THREAD_ID check is a cooperative same-user safety fence, not a
+malicious-process security boundary.
 Do not infer commit, push, release, publication, rights, or acceptance
 authority.
 ```

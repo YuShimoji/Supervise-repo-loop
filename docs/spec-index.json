@@ -37,6 +37,21 @@
       "status": "active"
     },
     {
+      "id": "durable-implementation-and-primary-execution-backlog",
+      "path": "docs/backlog.md",
+      "status": "active"
+    },
+    {
+      "id": "cross-host-static-and-automation-portability",
+      "path": "docs/host-portability.md",
+      "status": "active"
+    },
+    {
+      "id": "codex-automation-portability-v1",
+      "path": "references/automation-portability.v1.json",
+      "status": "active"
+    },
+    {
       "id": "coordinator-scheduler-v1",
       "path": "schemas/coordinator-scheduler.v1.schema.json",
       "status": "compatibility"

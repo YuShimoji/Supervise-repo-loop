@@ -51,6 +51,10 @@ USER_VISIBLE_CODEX_ENTRY_POINTS = 1
 SCHEDULER_STATE_VERSION = 2
 DEFAULT_COORDINATOR_CONCURRENCY_LIMIT = 3
 MAX_COORDINATOR_WAIT_TARGETS = 8
+MISSION_VALUE_CONTRACT_VERSION = 1
+MISSION_WORK_CLASSES = {"quick_win", "bounded_slice", "strategic_bet"}
+MISSION_OBJECTIVE_FITS = {"direct", "enabling", "exploratory"}
+PRIMARY_WRITER_REBIND_CONFIRMATION = "REBIND_PRIMARY_COORDINATOR_WRITER"
 
 MODES = {"coordinator", "worker", "single-thread", "binding-repair"}
 TERMINAL_STATES = {
@@ -200,6 +204,56 @@ AUTHORIZED_RUNTIME_ACTION_KINDS = (
     AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS
     | AUTHORIZED_RUNTIME_EXTERNAL_ACTION_KINDS
 )
+AUTHORIZED_RUNTIME_PROBE_STATUS_MATRIX = {
+    "delivery_failed": {
+        "probe_a": "pending",
+        "postcheck": "pending",
+        "probe_b": "pending",
+        "runtime_doctor": "pending",
+    },
+    "task_start_failed": {
+        "probe_a": "pending",
+        "postcheck": "pending",
+        "probe_b": "pending",
+        "runtime_doctor": "pending",
+    },
+    "regeneration_failed": {
+        "probe_a": "passed",
+        "postcheck": "failed",
+        "probe_b": "not_started",
+        "runtime_doctor": "not_started",
+    },
+    "postcheck_failed": {
+        "probe_a": "passed",
+        "postcheck": "failed",
+        "probe_b": "not_started",
+        "runtime_doctor": "not_started",
+    },
+    "probe_a_failed": {
+        "probe_a": "failed",
+        "postcheck": "not_started",
+        "probe_b": "not_started",
+        "runtime_doctor": "not_started",
+    },
+    "probe_b_failed": {
+        "probe_a": "passed",
+        "postcheck": "passed",
+        "probe_b": "failed",
+        "runtime_doctor": "not_started",
+    },
+    "runtime_doctor_failed": {
+        "probe_a": "passed",
+        "postcheck": "passed",
+        "probe_b": "passed",
+        "runtime_doctor": "failed",
+    },
+    "probe_passed": {
+        "probe_a": "passed",
+        "postcheck": "passed",
+        "probe_b": "passed",
+        "runtime_doctor": "passed",
+    },
+}
 ROUTE_OBSERVER_KINDS = {"codex_wait", "chatgpt_poll"}
 
 
@@ -878,6 +932,37 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
                     f"duplicate portfolio active route action_id: {action_id}"
                 )
             seen_route_ids.add(action_id)
+    if "next_user_action" not in portfolio:
+        raise ProtocolError("portfolio next_user_action is required")
+    next_user_action = portfolio.get("next_user_action")
+    if next_user_action is not None:
+        if not isinstance(next_user_action, dict):
+            raise ProtocolError("portfolio next_user_action must be an object or null")
+        required_action_fields = (
+            "repository_id",
+            "kind",
+            "purpose",
+            "why_now",
+            "entrypoint",
+            "reply_format",
+            "owner",
+            "post_reply_behavior",
+            "non_escalation_boundary",
+        )
+        for field in required_action_fields:
+            if not isinstance(next_user_action.get(field), str) or not str(
+                next_user_action[field]
+            ).strip():
+                raise ProtocolError(f"portfolio next_user_action {field} is required")
+        if next_user_action.get("kind") not in {"USER_DECISION", "USER_ACTION"}:
+            raise ProtocolError("portfolio next_user_action kind is invalid")
+        requirements = next_user_action.get("requirements")
+        if not isinstance(requirements, list) or not requirements or any(
+            not isinstance(item, str) or not item.strip() for item in requirements
+        ):
+            raise ProtocolError(
+                "portfolio next_user_action requirements must be a non-empty string array"
+            )
     repositories = portfolio.get("repositories")
     if not isinstance(repositories, list):
         raise ProtocolError("portfolio repositories must be an array")
@@ -902,6 +987,23 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
             item not in PORTFOLIO_STAGE_ORDER for item in completed
         ):
             raise ProtocolError("portfolio completed_stages is invalid")
+        roadmap = row.get("roadmap")
+        if not isinstance(roadmap, dict):
+            raise ProtocolError("portfolio roadmap is required")
+        for field in (
+            "overall_position",
+            "current_block",
+            "completion_definition",
+            "next_gate",
+        ):
+            if not isinstance(roadmap.get(field), str) or not roadmap[field].strip():
+                raise ProtocolError(f"portfolio roadmap {field} is required")
+        for field in ("completed_blocks", "next_blocks"):
+            values = roadmap.get(field)
+            if not isinstance(values, list) or any(
+                not isinstance(item, str) or not item.strip() for item in values
+            ):
+                raise ProtocolError(f"portfolio roadmap {field} is invalid")
         for field in ("why", "owner", "next_move"):
             if not isinstance(row.get(field), str) or not row[field].strip():
                 raise ProtocolError(f"portfolio row {field} is required")
@@ -913,6 +1015,21 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
             validate_blocked_contract(stop)
         elif stop is not None:
             validate_blocked_contract(stop)
+    waiting_user_ids = {
+        str(row.get("repository_id") or "")
+        for row in repositories
+        if row.get("state") == "WAITING_USER"
+    }
+    if waiting_user_ids and next_user_action is None:
+        raise ProtocolError(
+            "portfolio WAITING_USER requires one complete next_user_action"
+        )
+    if next_user_action is not None and str(
+        next_user_action.get("repository_id") or ""
+    ) not in waiting_user_ids:
+        raise ProtocolError(
+            "portfolio next_user_action must identify a WAITING_USER repository"
+        )
 
 
 def _active_scheduler_delivery_routes(
@@ -1089,6 +1206,41 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
         f"- Execution: `{_markdown_cell(portfolio.get('execution_state', 'IDLE'))}`",
         f"- Active routes: `{_markdown_cell(portfolio.get('active_route_count', 0))} / {_markdown_cell(portfolio.get('concurrency_limit', 3))}`",
     ]
+    next_user_action = portfolio.get("next_user_action")
+    lines.extend(["", "## Next user action", ""])
+    if next_user_action is None:
+        lines.append("None. The Coordinator can continue without user input.")
+    else:
+        action_project = next(
+            (
+                row.get("project_name") or row.get("repository_id")
+                for row in repositories
+                if row.get("repository_id") == next_user_action.get("repository_id")
+            ),
+            next_user_action.get("repository_id"),
+        )
+        lines.extend(
+            [
+                f"- Project: {_markdown_cell(action_project)}",
+                f"- Kind: `{_markdown_cell(next_user_action['kind'])}`",
+                f"- Purpose: {_markdown_cell(next_user_action['purpose'])}",
+                f"- Why now: {_markdown_cell(next_user_action['why_now'])}",
+                f"- Entrypoint: {_markdown_cell(next_user_action['entrypoint'])}",
+                f"- Owner: {_markdown_cell(next_user_action['owner'])}",
+                f"- Reply format: {_markdown_cell(next_user_action['reply_format'])}",
+                "- Requirements:",
+            ]
+        )
+        lines.extend(
+            f"  - {_markdown_cell(item)}"
+            for item in next_user_action["requirements"]
+        )
+        lines.extend(
+            [
+                f"- After reply: {_markdown_cell(next_user_action['post_reply_behavior'])}",
+                f"- Boundary: {_markdown_cell(next_user_action['non_escalation_boundary'])}",
+            ]
+        )
     active_routes = portfolio.get("active_routes")
     if isinstance(active_routes, list) and active_routes:
         lines.extend(
@@ -1184,6 +1336,33 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
                     row["why"],
                     row["owner"],
                     row["next_move"],
+                )
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Project roadmap position",
+            "",
+            "| Project | Overall position | Current block | Completed blocks | Next blocks | Next gate | Completion definition |",
+            "|---|---|---|---|---|---|---|",
+        ]
+    )
+    for row in repositories:
+        roadmap = row["roadmap"]
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    row.get("project_name") or row["repository_id"],
+                    roadmap["overall_position"],
+                    roadmap["current_block"],
+                    ", ".join(roadmap["completed_blocks"]) or "none",
+                    ", ".join(roadmap["next_blocks"]) or "none",
+                    roadmap["next_gate"],
+                    roadmap["completion_definition"],
                 )
             )
             + " |"
@@ -2509,6 +2688,7 @@ def _action_observer_kind(action: dict[str, Any]) -> str | None:
         "route_user_response",
         "await_supervisor_verdict",
         "await_supervisor_work_order",
+        "resolve_mission_value_gate",
         "return_worker_result",
         "request_next_mission",
         "return_authorized_runtime_recovery_result",
@@ -3136,6 +3316,7 @@ def _selection_route(
         "route_user_response",
         "await_supervisor_verdict",
         "await_supervisor_work_order",
+        "resolve_mission_value_gate",
         "return_worker_result",
         "request_next_mission",
     }:
@@ -3450,8 +3631,12 @@ def register_authorized_runtime_action(
     adapter: dict[str, Any],
     scheduler_state: dict[str, Any],
     trusted_events_dir: Path | str | None = None,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Register one exact Supervisor-authorized, fixed-handler recovery."""
+    require_primary_coordinator_writer(
+        coordinator_state, actor_task_id=actor_task_id
+    )
     allowed_spec_fields = {
         "schema_version",
         "runtime_action_id",
@@ -3911,6 +4096,9 @@ def _fixed_runtime_probe_contract(record: dict[str, Any]) -> dict[str, Any]:
         },
         "receipt_completion_required": {
             "path": record["recovery_receipt_path"],
+            "status_matrix": copy.deepcopy(
+                AUTHORIZED_RUNTIME_PROBE_STATUS_MATRIX
+            ),
             "fields": [
                 "regenerated_state.size",
                 "regenerated_state.sha256",
@@ -4372,14 +4560,6 @@ def build_coordinator_plan(
         repository_id = str(selection.get("repository_id") or "")
         kind = _selection_action_kind(selection)
         is_successor = kind == "request_next_mission"
-        route = _selection_route(
-            selection,
-            registry=registry,
-            hosts=hosts,
-            adapter=adapter,
-            missions=mission_list,
-            kind=kind,
-        )
         selected_mission = next(
             (
                 item
@@ -4391,10 +4571,27 @@ def build_coordinator_plan(
             ),
             None,
         )
+        value_gate_issue = (
+            _mission_value_gate_issue(selected_mission)
+            if kind in {"advance_mission", "dispatch_work_order"}
+            else None
+        )
+        blocked_kind = kind if value_gate_issue else None
+        if value_gate_issue:
+            kind = "resolve_mission_value_gate"
+        route = _selection_route(
+            selection,
+            registry=registry,
+            hosts=hosts,
+            adapter=adapter,
+            missions=mission_list,
+            kind=kind,
+        )
         action_revision = canonical_json_hash(
             {
                 "selection": selection,
                 "mission": _semantic_scheduler_value(selected_mission),
+                "value_gate_issue": value_gate_issue,
                 "authority_fingerprint": (
                     signal_by_repository.get(repository_id) or {}
                 ).get("authority_fingerprint"),
@@ -4407,6 +4604,23 @@ def build_coordinator_plan(
                 "selection": selection,
                 "route": route,
                 "action_revision": action_revision,
+                **(
+                    {
+                        "mission_value_gate": {
+                            "classification": "MISSION_VALUE_GATE_REQUIRED",
+                            "issue": value_gate_issue,
+                            "blocked_action_kind": blocked_kind,
+                            "allowed_resolutions": [
+                                "admit_valid_value_contract",
+                                "return_no_work",
+                                "park_mission",
+                            ],
+                            "admission_event": "value_contract_admitted",
+                        }
+                    }
+                    if value_gate_issue
+                    else {}
+                ),
             },
             priority=(50 if is_successor else 10 + int(selection.get("selection_priority", 6))),
             stable_order=repository_order.get(repository_id, 999999),
@@ -4415,6 +4629,7 @@ def build_coordinator_plan(
                 "route_user_response",
                 "await_supervisor_verdict",
                 "await_supervisor_work_order",
+                "resolve_mission_value_gate",
                 "await_worker_result",
                 "return_worker_result",
                 "dispatch_work_order",
@@ -4757,6 +4972,9 @@ def build_coordinator_plan(
     result.update(
         {
             "classification": "COORDINATOR_DETERMINISTIC_PLAN",
+            "primary_writer_task_id": str(
+                coordinator_state.get("coordinator_task", {}).get("task_id") or ""
+            ),
             "global_state": global_state,
             "state_fingerprint": state_fingerprint,
             "has_ready_action": bool(ready_actions),
@@ -5136,13 +5354,18 @@ def execute_authorized_runtime_action(
     *,
     dry_run: bool = False,
     persist_state: Callable[[], None] | None = None,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Prepare the fixed deny-read state repair without running any probe."""
+    actor = require_primary_coordinator_writer(
+        coordinator_state, actor_task_id=actor_task_id
+    )
     _ensure_scheduler_state_v2(scheduler_state)
     active = scheduler_state.get("scheduler_claim")
     if not isinstance(active, dict) or active.get("action_id") != action_id:
         completed = _runtime_completion(scheduler_state, action_id)
         if isinstance(completed, dict):
+            _bind_or_validate_scheduler_record_owner(completed, actor)
             completed_action = completed.get("action", {})
             runtime_payload = completed_action.get("payload", {}).get(
                 "runtime_action", {}
@@ -5192,6 +5415,7 @@ def execute_authorized_runtime_action(
                 "deduplicated": True,
             }
         raise ProtocolError("exact authorized runtime scheduler claim is required")
+    _bind_or_validate_scheduler_record_owner(active, actor)
     if active.get("action", {}).get("kind") != "execute_authorized_runtime_repair":
         raise ProtocolError("claimed action is not the authorized runtime repair")
     record = _runtime_action_from_scheduler_record(active, coordinator_state)
@@ -5213,6 +5437,7 @@ def execute_authorized_runtime_action(
             outcome,
             evidence=record["recovery_receipt_path"],
             coordinator_state=coordinator_state,
+            actor_task_id=actor,
         )
         if persist_state is not None:
             persist_state()
@@ -5277,6 +5502,7 @@ def execute_authorized_runtime_action(
             "precondition_mismatch",
             evidence=str(receipt_path),
             coordinator_state=coordinator_state,
+            actor_task_id=actor,
         )
         if persist_state is not None:
             persist_state()
@@ -5357,6 +5583,7 @@ def execute_authorized_runtime_action(
         "repair_prepared",
         evidence=str(receipt_path),
         coordinator_state=coordinator_state,
+        actor_task_id=actor,
     )
     if persist_state is not None:
         persist_state()
@@ -5379,13 +5606,18 @@ def rollback_authorized_runtime_action(
     *,
     dry_run: bool = False,
     persist_state: Callable[[], None] | None = None,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Restore the byte-exact original while preserving backup/quarantine."""
+    actor = require_primary_coordinator_writer(
+        coordinator_state, actor_task_id=actor_task_id
+    )
     _ensure_scheduler_state_v2(scheduler_state)
     active = scheduler_state.get("scheduler_claim")
     if not isinstance(active, dict) or active.get("action_id") != action_id:
         completed = _runtime_completion(scheduler_state, action_id)
         if isinstance(completed, dict):
+            _bind_or_validate_scheduler_record_owner(completed, actor)
             completed_action = completed.get("action", {})
             runtime_payload = completed_action.get("payload", {}).get(
                 "runtime_action", {}
@@ -5424,6 +5656,7 @@ def rollback_authorized_runtime_action(
                 "deduplicated": True,
             }
         raise ProtocolError("exact authorized runtime rollback claim is required")
+    _bind_or_validate_scheduler_record_owner(active, actor)
     if active.get("action", {}).get("kind") != "rollback_authorized_runtime_repair":
         raise ProtocolError("claimed action is not the authorized runtime rollback")
     record = _runtime_action_from_scheduler_record(active, coordinator_state)
@@ -5436,6 +5669,7 @@ def rollback_authorized_runtime_action(
             "rolled_back",
             evidence=record["recovery_receipt_path"],
             coordinator_state=coordinator_state,
+            actor_task_id=actor,
         )
         if persist_state is not None:
             persist_state()
@@ -5498,6 +5732,7 @@ def rollback_authorized_runtime_action(
         "rolled_back",
         evidence=record["recovery_receipt_path"],
         coordinator_state=coordinator_state,
+        actor_task_id=actor,
     )
     if persist_state is not None:
         persist_state()
@@ -5520,13 +5755,18 @@ def reconcile_authorized_runtime_completion(
     *,
     dry_run: bool = False,
     persist_state: Callable[[], None] | None = None,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Apply one scheduler-completed runtime transition missing from the ledger."""
+    actor = require_primary_coordinator_writer(
+        coordinator_state, actor_task_id=actor_task_id
+    )
     _ensure_scheduler_state_v2(scheduler_state)
     active = scheduler_state.get("scheduler_claim")
     if not isinstance(active, dict) or active.get("action_id") != action_id:
         completed = _runtime_completion(scheduler_state, action_id)
         if isinstance(completed, dict) and completed.get("outcome") == "reconciled":
+            _bind_or_validate_scheduler_record_owner(completed, actor)
             return {
                 "classification": "AUTHORIZED_RUNTIME_COMPLETION_ALREADY_RECONCILED",
                 "action_id": action_id,
@@ -5536,6 +5776,7 @@ def reconcile_authorized_runtime_completion(
     action = active.get("action", {})
     if action.get("kind") != "reconcile_authorized_runtime_completion":
         raise ProtocolError("claimed action is not runtime completion reconciliation")
+    _bind_or_validate_scheduler_record_owner(active, actor)
     runtime_payload = action.get("payload", {}).get("runtime_action", {})
     record = _authorized_runtime_record(
         coordinator_state, str(runtime_payload.get("runtime_action_id") or "")
@@ -5575,6 +5816,7 @@ def reconcile_authorized_runtime_completion(
         action_id,
         "reconciled",
         evidence=str(completion.get("evidence") or ""),
+        actor_task_id=actor,
     )
     if persist_state is not None:
         persist_state()
@@ -5588,6 +5830,26 @@ def reconcile_authorized_runtime_completion(
     }
 
 
+def _bind_or_validate_scheduler_record_owner(
+    record: dict[str, Any], actor_task_id: str | None
+) -> str:
+    actor = str(
+        actor_task_id
+        if actor_task_id is not None
+        else os.environ.get("CODEX_THREAD_ID", "")
+    ).strip()
+    if not actor:
+        raise ProtocolError("Coordinator mutation requires an exact actor task ID")
+    owner = str(record.get("owner_task_id") or "").strip()
+    if owner and owner != actor:
+        raise ProtocolError(
+            "COORDINATOR_WRITER_OWNERSHIP_MISMATCH: action belongs to another task"
+        )
+    if not owner:
+        record["owner_task_id"] = actor
+    return actor
+
+
 def claim_coordinator_action(
     scheduler_state: dict[str, Any],
     plan: dict[str, Any],
@@ -5596,16 +5858,38 @@ def claim_coordinator_action(
     owner_task_id: str | None = None,
 ) -> dict[str, Any]:
     _ensure_scheduler_state_v2(scheduler_state)
+    actor = str(
+        owner_task_id
+        if owner_task_id is not None
+        else os.environ.get("CODEX_THREAD_ID", "")
+    ).strip()
+    if not actor:
+        raise ProtocolError("Coordinator mutation requires an exact actor task ID")
+    primary_writer = str(plan.get("primary_writer_task_id") or "").strip()
+    if not primary_writer:
+        raise ProtocolError(
+            "PRIMARY_COORDINATOR_WRITER_UNBOUND: plan lacks an exact primary writer"
+        )
+    if actor != primary_writer:
+        raise ProtocolError(
+            "READ_ONLY_NON_COORDINATOR_TASK: scheduler claim is reserved for "
+            "the plan's bound primary Coordinator"
+        )
     active = scheduler_state.get("scheduler_claim")
     if isinstance(active, dict):
         if active.get("action_id") == action_id:
+            _bind_or_validate_scheduler_record_owner(active, actor)
             return {
                 "classification": "COORDINATOR_ACTION_ALREADY_CLAIMED",
                 "action_id": action_id,
                 "deduplicated": True,
             }
         raise ProtocolError("another short-lived Coordinator scheduler claim is active")
-    if _route_lease_index(scheduler_state, action_id) is not None:
+    lease_index = _route_lease_index(scheduler_state, action_id)
+    if lease_index is not None:
+        _bind_or_validate_scheduler_record_owner(
+            scheduler_state["route_leases"][lease_index], actor
+        )
         return {
             "classification": "COORDINATOR_ACTION_ALREADY_WAITING",
             "action_id": action_id,
@@ -5637,7 +5921,7 @@ def claim_coordinator_action(
             "action": copy.deepcopy(action),
             "status": "claimed",
             "state_fingerprint": plan.get("state_fingerprint"),
-            "owner_task_id": owner_task_id,
+            "owner_task_id": actor,
             "claimed_at": utc_now(),
         }
     )
@@ -5656,6 +5940,8 @@ def prepare_coordinator_action_delivery(
     action_id: str,
     recipient_thread_id: str,
     packet_sha256: str,
+    *,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist an idempotent delivery envelope before any external send."""
     _ensure_scheduler_state_v2(scheduler_state)
@@ -5667,6 +5953,7 @@ def prepare_coordinator_action_delivery(
     )
     if not isinstance(active, dict) or active.get("action_id") != action_id:
         raise ProtocolError("exact Coordinator scheduler claim is required")
+    _bind_or_validate_scheduler_record_owner(active, actor_task_id)
     if active.get("action", {}).get("requires_external_result") is not True:
         raise ProtocolError("local Coordinator action cannot prepare delivery")
     route = active.get("action", {}).get("payload", {}).get("route", {})
@@ -5739,12 +6026,14 @@ def mark_coordinator_action_sent(
     *,
     packet_sha256: str | None = None,
     after_cursor: str | None = None,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Move a sent claim to a route lease, releasing the global scheduler."""
     _ensure_scheduler_state_v2(scheduler_state)
     lease_index = _route_lease_index(scheduler_state, action_id)
     if lease_index is not None:
         lease = scheduler_state["route_leases"][lease_index]
+        _bind_or_validate_scheduler_record_owner(lease, actor_task_id)
         if lease.get("recipient_thread_id") != recipient_thread_id:
             raise ProtocolError("sent recipient does not match route lease")
         if not isinstance(packet_sha256, str) or (
@@ -5778,6 +6067,7 @@ def mark_coordinator_action_sent(
     active = scheduler_state.get("scheduler_claim")
     if not isinstance(active, dict) or active.get("action_id") != action_id:
         raise ProtocolError("exact active Coordinator scheduler claim is required")
+    _bind_or_validate_scheduler_record_owner(active, actor_task_id)
     if active.get("action", {}).get("requires_external_result") is not True:
         raise ProtocolError("local Coordinator action cannot be marked as sent")
     if active.get("status") != "prepared":
@@ -5933,23 +6223,17 @@ def _validate_authorized_runtime_probe_evidence(
     postcheck = receipt.get("postcheck", {})
     probe_b = receipt.get("probe_b", {})
     doctor = receipt.get("runtime_doctor", {})
-    statuses = (
-        probe_a.get("status") if isinstance(probe_a, dict) else None,
-        postcheck.get("status") if isinstance(postcheck, dict) else None,
-        probe_b.get("status") if isinstance(probe_b, dict) else None,
-        doctor.get("status") if isinstance(doctor, dict) else None,
-    )
-    allowed_statuses = {
-        "delivery_failed": {("pending", "pending", "pending", "pending")},
-        "task_start_failed": {("pending", "pending", "pending", "pending")},
-        "regeneration_failed": {("passed", "failed", "not_started", "not_started")},
-        "postcheck_failed": {("passed", "failed", "not_started", "not_started")},
-        "probe_a_failed": {("failed", "not_started", "not_started", "not_started")},
-        "probe_b_failed": {("passed", "passed", "failed", "not_started")},
-        "runtime_doctor_failed": {("passed", "passed", "passed", "failed")},
-        "probe_passed": {("passed", "passed", "passed", "passed")},
+    statuses = {
+        "probe_a": probe_a.get("status") if isinstance(probe_a, dict) else None,
+        "postcheck": (
+            postcheck.get("status") if isinstance(postcheck, dict) else None
+        ),
+        "probe_b": probe_b.get("status") if isinstance(probe_b, dict) else None,
+        "runtime_doctor": (
+            doctor.get("status") if isinstance(doctor, dict) else None
+        ),
     }
-    if statuses not in allowed_statuses.get(outcome, set()):
+    if statuses != AUTHORIZED_RUNTIME_PROBE_STATUS_MATRIX.get(outcome):
         raise ProtocolError("runtime probe receipt phase ordering mismatch")
 
     probe_contract = _fixed_runtime_probe_contract(record)
@@ -6319,6 +6603,7 @@ def complete_coordinator_action(
     *,
     evidence: str | None = None,
     coordinator_state: dict[str, Any] | None = None,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     _ensure_scheduler_state_v2(scheduler_state)
     active = scheduler_state.get("scheduler_claim")
@@ -6337,6 +6622,9 @@ def complete_coordinator_action(
             None,
         )
         if isinstance(existing_completion, dict):
+            _bind_or_validate_scheduler_record_owner(
+                existing_completion, actor_task_id
+            )
             if existing_completion.get("outcome") != outcome or (
                 str(existing_completion.get("evidence") or "")
                 != str(evidence or "")
@@ -6366,6 +6654,7 @@ def complete_coordinator_action(
                 "deduplicated": True,
             }
         raise ProtocolError("exact Coordinator scheduler claim or route lease is required")
+    _bind_or_validate_scheduler_record_owner(active, actor_task_id)
     requires_external_result = (
         active.get("action", {}).get("requires_external_result") is True
     )
@@ -6436,6 +6725,7 @@ def complete_coordinator_action(
         "packet_sha256": active.get("packet_sha256"),
         "delivery_token": active.get("delivery_token"),
         "after_cursor": active.get("after_cursor"),
+        "owner_task_id": active.get("owner_task_id"),
         "completed_at": utc_now(),
     }
     completed = [
@@ -6467,6 +6757,8 @@ def release_coordinator_action(
     scheduler_state: dict[str, Any],
     action_id: str,
     reason: str,
+    *,
+    actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Release only an unprepared short-lived scheduler claim."""
     _ensure_scheduler_state_v2(scheduler_state)
@@ -6485,6 +6777,9 @@ def release_coordinator_action(
             None,
         )
         if isinstance(existing_release, dict):
+            _bind_or_validate_scheduler_record_owner(
+                existing_release, actor_task_id
+            )
             if existing_release.get("reason") != reason:
                 raise ProtocolError("conflicting released action replay")
             return {
@@ -6494,6 +6789,7 @@ def release_coordinator_action(
                 "deduplicated": True,
             }
         raise ProtocolError("exact active Coordinator scheduler claim is required")
+    _bind_or_validate_scheduler_record_owner(active, actor_task_id)
     if active.get("status") != "claimed":
         raise ProtocolError(
             "prepared Coordinator action must be reconciled, not released"
@@ -6506,6 +6802,7 @@ def release_coordinator_action(
             "action_id": action_id,
             "status": active.get("status"),
             "reason": reason,
+            "owner_task_id": active.get("owner_task_id"),
             "released_at": utc_now(),
         }
     )
@@ -7690,6 +7987,173 @@ def validate_user_action_card(card: dict[str, Any]) -> None:
         raise ProtocolError("user action card missing: " + ", ".join(missing))
 
 
+def validate_mission_value_contract(contract: Any) -> None:
+    """Fail closed when a proposed Mission has no short path back to value."""
+    if not isinstance(contract, dict):
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: new live Missions require a value_contract"
+        )
+    if contract.get("contract_version") != MISSION_VALUE_CONTRACT_VERSION:
+        raise ProtocolError("MISSION_VALUE_GATE: unsupported value_contract version")
+    required = (
+        "authority_source",
+        "authority_revision",
+        "authority_fingerprint",
+        "authority_next_action",
+        "north_star",
+        "current_bottleneck",
+        "current_gate",
+        "gate_delta",
+        "expected_authority_state_after",
+        "expected_user_value",
+        "smallest_deliverable",
+        "next_consumer",
+        "reuse_or_integration",
+        "existing_artifact_reused",
+        "creates_new_artifact",
+        "new_source_story_form_or_candidate",
+        "advances_current_next_action",
+        "adoption_test",
+        "kill_condition",
+        "objective_fit",
+        "work_class",
+        "max_worker_turns",
+        "genre_or_domain_shift",
+        "out_of_scope",
+    )
+    _required(contract, required, "value_contract")
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{64}", str(contract.get("authority_fingerprint") or "")
+    ):
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: authority_fingerprint must be exact SHA-256"
+        )
+    if contract.get("objective_fit") not in MISSION_OBJECTIVE_FITS:
+        raise ProtocolError("MISSION_VALUE_GATE: invalid objective_fit")
+    work_class = str(contract.get("work_class") or "")
+    if work_class not in MISSION_WORK_CLASSES:
+        raise ProtocolError("MISSION_VALUE_GATE: invalid work_class")
+    if contract.get("advances_current_next_action") is not True:
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: Mission must directly advance authority_next_action"
+        )
+    if work_class == "quick_win" and contract.get("objective_fit") != "direct":
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: quick_win must have direct objective_fit"
+        )
+    max_turns = contract.get("max_worker_turns")
+    if not isinstance(max_turns, int) or not (1 <= max_turns <= 2):
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: max_worker_turns must be one or two"
+        )
+    out_of_scope = contract.get("out_of_scope")
+    if not isinstance(out_of_scope, list) or not out_of_scope or not all(
+        isinstance(item, str) and item.strip() for item in out_of_scope
+    ):
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: out_of_scope must be a non-empty string list"
+        )
+    if work_class != "quick_win" and not str(
+        contract.get("why_not_smaller") or ""
+    ).strip():
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: non-quick work requires why_not_smaller"
+        )
+    if max_turns == 2 and not str(contract.get("why_not_one_turn") or "").strip():
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: two-turn work requires why_not_one_turn"
+        )
+    if work_class != "quick_win" and not str(
+        contract.get("quick_win_unavailable_evidence") or ""
+    ).strip():
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: non-quick work requires evidence that no "
+            "smaller current-gate move is available"
+        )
+    creates_new_artifact = contract.get("creates_new_artifact") is True
+    changes_content_lane = bool(
+        contract.get("new_source_story_form_or_candidate")
+    )
+    if creates_new_artifact and not str(
+        contract.get("new_artifact_justification") or ""
+    ).strip():
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: new artifact creation requires justification"
+        )
+    if (
+        not creates_new_artifact
+        and contract.get("existing_artifact_reused") is not True
+    ):
+        raise ProtocolError(
+            "MISSION_VALUE_GATE: quick path must reuse the existing artifact"
+        )
+    needs_explicit_authority = (
+        bool(contract.get("genre_or_domain_shift"))
+        or creates_new_artifact
+        or changes_content_lane
+        or work_class == "strategic_bet"
+        or contract.get("objective_fit") == "exploratory"
+    )
+    if needs_explicit_authority:
+        if contract.get("explicit_user_authorized") is not True or not str(
+            contract.get("user_authorization_evidence") or ""
+        ).strip():
+            raise ProtocolError(
+                "MISSION_VALUE_GATE: new artifacts, source/story/form/candidate "
+                "changes, genre/domain shifts, exploratory work, and strategic "
+                "bets require explicit user authorization evidence"
+            )
+
+
+def require_new_mission_value_contract(payload: dict[str, Any]) -> None:
+    validate_mission_value_contract(payload.get("value_contract"))
+
+
+def _mission_value_gate_issue(mission: Any) -> str | None:
+    if not isinstance(mission, dict):
+        return "selected Mission record is missing"
+    try:
+        validate_mission_value_contract(mission.get("value_contract"))
+    except ProtocolError as exc:
+        return str(exc)
+    return None
+
+
+def admit_mission_value_contract(
+    mission: dict[str, Any], contract: Any
+) -> dict[str, Any]:
+    """Attach one immutable value contract to a legacy live Mission."""
+    validate_mission_value_contract(contract)
+    admitted = copy.deepcopy(contract)
+    fingerprint = canonical_json_hash(admitted)
+    existing = mission.get("value_contract")
+    if existing is not None:
+        validate_mission_value_contract(existing)
+        if canonical_json_hash(existing) != fingerprint:
+            raise ProtocolError(
+                "MISSION_VALUE_GATE: an admitted value_contract cannot be replaced"
+            )
+        return {
+            "classification": "MISSION_VALUE_CONTRACT_ALREADY_ADMITTED",
+            "value_contract_fingerprint": fingerprint,
+            "state": mission.get("state"),
+        }
+    mission["value_contract"] = admitted
+    _record_state(
+        mission,
+        str(mission.get("state") or ""),
+        {
+            "event_kind": "MISSION_VALUE_CONTRACT_ADMITTED",
+            "value_contract_fingerprint": fingerprint,
+        },
+    )
+    return {
+        "classification": "MISSION_VALUE_CONTRACT_ADMITTED",
+        "value_contract_fingerprint": fingerprint,
+        "state": mission.get("state"),
+    }
+
+
 def new_mission(payload: dict[str, Any]) -> dict[str, Any]:
     mode = payload.get("mode", "coordinator")
     _required(
@@ -7712,7 +8176,7 @@ def new_mission(payload: dict[str, Any]) -> dict[str, Any]:
         )
     review_policy = normalize_review_policy(payload.get("review_policy"))
     now = utc_now()
-    return {
+    mission = {
         "schema_version": SCHEMA_VERSION,
         "repository_id": payload["repository_id"],
         "launch_set_id": payload["launch_set_id"],
@@ -7741,6 +8205,10 @@ def new_mission(payload: dict[str, Any]) -> dict[str, Any]:
         "created_at": now,
         "updated_at": now,
     }
+    if "value_contract" in payload:
+        validate_mission_value_contract(payload["value_contract"])
+        mission["value_contract"] = copy.deepcopy(payload["value_contract"])
+    return mission
 
 
 def _record_state(
@@ -8067,6 +8535,8 @@ def start_continuation(
             "external_effects", prior["external_effects"]
         ),
     }
+    if "value_contract" in next_payload:
+        payload["value_contract"] = copy.deepcopy(next_payload["value_contract"])
     return new_mission(payload)
 
 
@@ -8077,6 +8547,8 @@ def validate_mission(mission: dict[str, Any]) -> None:
         raise ProtocolError("invalid mission_status")
     if mission.get("review_status") not in REVIEW_STATUSES:
         raise ProtocolError("invalid review_status")
+    if "value_contract" in mission:
+        validate_mission_value_contract(mission["value_contract"])
     if mission.get("review_policy") is not None:
         normalize_review_policy(mission["review_policy"])
     _required(
@@ -8637,6 +9109,279 @@ def validate_coordinator_state(state: dict[str, Any]) -> None:
         )
 
 
+def require_primary_coordinator_writer(
+    coordinator_state: dict[str, Any],
+    *,
+    actor_task_id: str | None = None,
+) -> str:
+    """Return the bound primary task ID or fail closed for live mutations.
+
+    Codex supplies ``CODEX_THREAD_ID`` to every task process.  The persisted
+    Coordinator binding is therefore an operational writer fence: repair,
+    audit, and status tasks may read the plan, but they cannot claim actions or
+    mutate the live Coordinator ledgers merely by supplying the primary task's
+    ID as a command-line argument.
+    """
+    validate_coordinator_state(coordinator_state)
+    binding = coordinator_state.get("coordinator_task")
+    if not isinstance(binding, dict):
+        raise ProtocolError(
+            "PRIMARY_COORDINATOR_WRITER_UNBOUND: coordinator_task is missing"
+        )
+    bound_task_id = str(binding.get("task_id") or "").strip()
+    if (
+        binding.get("scope") != "all_repositories"
+        or binding.get("binding_status") != "active"
+        or not bound_task_id
+    ):
+        raise ProtocolError(
+            "PRIMARY_COORDINATOR_WRITER_UNBOUND: an active exact task binding "
+            "is required before live mutation"
+        )
+    actor = str(
+        actor_task_id
+        if actor_task_id is not None
+        else os.environ.get("CODEX_THREAD_ID", "")
+    ).strip()
+    if not actor:
+        raise ProtocolError(
+            "PRIMARY_COORDINATOR_WRITER_UNKNOWN: CODEX_THREAD_ID is required"
+        )
+    if actor != bound_task_id:
+        raise ProtocolError(
+            "READ_ONLY_NON_COORDINATOR_TASK: live Coordinator mutation is "
+            "reserved for the bound primary Coordinator task"
+        )
+    return actor
+
+
+def rebind_primary_coordinator_writer(
+    coordinator_state: dict[str, Any],
+    scheduler_state: dict[str, Any],
+    *,
+    expected_current_task_id: str,
+    new_task_id: str,
+    reason: str,
+    confirmation: str,
+    actor_task_id: str | None = None,
+) -> dict[str, Any]:
+    """Perform one explicit idle-only primary writer generation change."""
+    if confirmation != PRIMARY_WRITER_REBIND_CONFIRMATION:
+        raise ProtocolError("primary writer rebind confirmation is missing")
+    actor = str(
+        actor_task_id
+        if actor_task_id is not None
+        else os.environ.get("CODEX_THREAD_ID", "")
+    ).strip()
+    requested = str(new_task_id or "").strip()
+    if not actor or actor != requested:
+        raise ProtocolError(
+            "primary writer rebind must bind the exact current CODEX_THREAD_ID"
+        )
+    if not str(reason or "").strip():
+        raise ProtocolError("primary writer rebind requires an explicit reason")
+    _ensure_scheduler_state_v2(scheduler_state)
+    if isinstance(scheduler_state.get("scheduler_claim"), dict) or any(
+        isinstance(item, dict) for item in scheduler_state.get("route_leases", [])
+    ):
+        raise ProtocolError(
+            "PRIMARY_COORDINATOR_REBIND_NOT_IDLE: claim or route lease is active"
+        )
+    recovery_phases = {
+        "EFFECT_INTENT",
+        "EFFECT_PREPARED",
+        "REPAIR_PREPARED",
+        "ROLLBACK_REQUIRED",
+        "RESULT_READY",
+    }
+    if any(
+        isinstance(item, dict) and item.get("phase") in recovery_phases
+        for item in coordinator_state.get("authorized_runtime_actions", [])
+    ):
+        raise ProtocolError(
+            "PRIMARY_COORDINATOR_REBIND_NOT_IDLE: runtime recovery is unfinished"
+        )
+    binding = coordinator_state.setdefault("coordinator_task", {})
+    current = str(binding.get("task_id") or "").strip()
+    expected = str(expected_current_task_id or "").strip()
+    normalized_expected = "" if expected == "UNBOUND" else expected
+    if current != normalized_expected:
+        raise ProtocolError("primary writer rebind expected-current identity mismatch")
+    if current == requested:
+        return {
+            "classification": "PRIMARY_COORDINATOR_WRITER_ALREADY_BOUND",
+            "previous_task_id": current or None,
+            "new_task_id": requested,
+            "deduplicated": True,
+        }
+    rebound_at = utc_now()
+    binding.update(
+        {
+            "scope": "all_repositories",
+            "task_id": requested,
+            "binding_status": "active",
+            "previous_task_id": current or None,
+            "rebound_at": rebound_at,
+            "rebind_reason": str(reason).strip(),
+        }
+    )
+    return {
+        "classification": "PRIMARY_COORDINATOR_WRITER_REBOUND",
+        "previous_task_id": current or None,
+        "new_task_id": requested,
+        "rebound_at": rebound_at,
+        "deduplicated": False,
+    }
+
+
+def _same_resolved_path(left: Path | str, right: Path | str) -> bool:
+    return Path(left).resolve(strict=False) == Path(right).resolve(strict=False)
+
+
+def _path_is_within(path: Path | str, root: Path | str) -> bool:
+    try:
+        Path(path).resolve(strict=False).relative_to(Path(root).resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _require_exact_cli_path(
+    args: argparse.Namespace, argument: str, expected: Path
+) -> None:
+    observed = getattr(args, argument, None)
+    if observed is None or not _same_resolved_path(observed, expected):
+        raise ProtocolError(
+            "CANONICAL_LIVE_STATE_REQUIRED: "
+            f"--{argument.replace('_', '-')} must be {expected}"
+        )
+
+
+def _live_mutation_targets(args: argparse.Namespace) -> list[Path]:
+    names_by_command = {
+        "resolve": ("registry", "hosts"),
+        "compile-work-order": ("output",),
+        "migrate": ("output", "report"),
+        "migrate-coordinator-ux": ("registry", "coordinator_state", "report"),
+        "migrate-scheduler-state": ("output",),
+        "mission-init": ("missions_dir",),
+        "mission-event": ("mission",),
+        "mission-blocker-contract": ("mission",),
+        "mission-continue": ("missions_dir",),
+        "terminal": ("terminal_dir", "ledger"),
+        "portfolio-render": ("output",),
+        "coordinator-action-claim": ("scheduler_state",),
+        "coordinator-action-prepare": ("scheduler_state",),
+        "coordinator-action-sent": ("scheduler_state",),
+        "coordinator-action-complete": ("scheduler_state", "coordinator_state"),
+        "coordinator-action-release": ("scheduler_state",),
+        "authorized-runtime-action-register": ("coordinator_state",),
+        "authorized-runtime-action-execute": (
+            "coordinator_state",
+            "scheduler_state",
+        ),
+        "authorized-runtime-action-rollback": (
+            "coordinator_state",
+            "scheduler_state",
+        ),
+        "authorized-runtime-action-reconcile-completion": (
+            "coordinator_state",
+            "scheduler_state",
+        ),
+        "queue-coordinator-event": ("coordinator_state",),
+        "ack-coordinator-event": ("coordinator_state",),
+        "route-user-response": ("mission", "coordinator_state"),
+        "ack-user-response": ("mission", "coordinator_state"),
+    }
+    return [
+        Path(value)
+        for name in names_by_command.get(args.command, ())
+        if (value := getattr(args, name, None)) is not None
+    ]
+
+
+def _require_canonical_live_mutation_paths(args: argparse.Namespace) -> None:
+    """Bind live writes to the installed authority set, not caller clones.
+
+    This is a cooperative operational fence.  It prevents ordinary repair,
+    audit, or report tasks from pointing a mutating CLI at a cloned authority
+    file while writing a real scheduler or Mission ledger.  It is not a
+    security boundary against a same-user process that writes files directly.
+    """
+    runtime_commands = {
+        "authorized-runtime-action-register",
+        "authorized-runtime-action-execute",
+        "authorized-runtime-action-rollback",
+        "authorized-runtime-action-reconcile-completion",
+    }
+    if args.command in runtime_commands:
+        _require_exact_cli_path(args, "coordinator_state", DEFAULT_COORDINATOR_STATE)
+        _require_exact_cli_path(args, "scheduler_state", DEFAULT_SCHEDULER_STATE)
+        if args.command == "authorized-runtime-action-register":
+            _require_exact_cli_path(args, "registry", DEFAULT_BINDINGS)
+            _require_exact_cli_path(args, "hosts", DEFAULT_HOSTS)
+            _require_exact_cli_path(args, "adapter", DEFAULT_ADAPTER)
+        return
+
+    live_root = SKILL_ROOT / "state"
+    if not any(_path_is_within(path, live_root) for path in _live_mutation_targets(args)):
+        return
+
+    if hasattr(args, "coordinator_state"):
+        _require_exact_cli_path(args, "coordinator_state", DEFAULT_COORDINATOR_STATE)
+    required_by_command = {
+        "resolve": {
+            "registry": DEFAULT_BINDINGS,
+            "hosts": DEFAULT_HOSTS,
+            "adapter": DEFAULT_ADAPTER,
+        },
+        "compile-work-order": {"mission": DEFAULT_MISSIONS},
+        "migrate-coordinator-ux": {
+            "registry": DEFAULT_BINDINGS,
+            "coordinator_state": DEFAULT_COORDINATOR_STATE,
+        },
+        "migrate-scheduler-state": {
+            "input": DEFAULT_SCHEDULER_STATE,
+            "output": DEFAULT_SCHEDULER_STATE,
+        },
+        "portfolio-render": {
+            "input": DEFAULT_PORTFOLIO_JSON,
+            "output": DEFAULT_PORTFOLIO_MARKDOWN,
+            "scheduler_state": DEFAULT_SCHEDULER_STATE,
+        },
+        "terminal": {"mission": DEFAULT_MISSIONS},
+        "route-user-response": {"mission": DEFAULT_MISSIONS},
+        "ack-user-response": {"mission": DEFAULT_MISSIONS},
+        "coordinator-action-claim": {
+            "registry": DEFAULT_BINDINGS,
+            "hosts": DEFAULT_HOSTS,
+            "adapter": DEFAULT_ADAPTER,
+            "missions_dir": DEFAULT_MISSIONS,
+            "scheduler_state": DEFAULT_SCHEDULER_STATE,
+        },
+        "coordinator-action-prepare": {
+            "scheduler_state": DEFAULT_SCHEDULER_STATE
+        },
+        "coordinator-action-sent": {"scheduler_state": DEFAULT_SCHEDULER_STATE},
+        "coordinator-action-complete": {
+            "scheduler_state": DEFAULT_SCHEDULER_STATE
+        },
+        "coordinator-action-release": {
+            "scheduler_state": DEFAULT_SCHEDULER_STATE
+        },
+    }
+    for name, expected in required_by_command.get(args.command, {}).items():
+        observed = getattr(args, name, None)
+        if name == "mission" and expected == DEFAULT_MISSIONS:
+            if observed is None or not _path_is_within(observed, expected):
+                raise ProtocolError(
+                    "CANONICAL_LIVE_STATE_REQUIRED: Mission must be in the "
+                    f"canonical ledger {expected}"
+                )
+        else:
+            _require_exact_cli_path(args, name, expected)
+
+
 def validate_registry(registry: dict[str, Any], hosts: dict[str, Any]) -> None:
     if registry.get("schema_version") != SCHEMA_VERSION:
         raise ProtocolError("unsupported binding registry schema")
@@ -8806,7 +9551,17 @@ def validate_registry(registry: dict[str, Any], hosts: dict[str, Any]) -> None:
 
 
 def _json_stdout(value: Any) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+    options = {"indent": 2, "sort_keys": True}
+    rendered = json.dumps(value, ensure_ascii=False, **options)
+    output_encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        rendered.encode(output_encoding)
+    except (LookupError, UnicodeEncodeError):
+        # Windows task shells may expose cp932 even though persisted state is
+        # UTF-8. Keep stdout machine-readable instead of crashing on a path or
+        # verdict containing an otherwise valid Unicode character.
+        rendered = json.dumps(value, ensure_ascii=True, **options)
+    sys.stdout.write(rendered + "\n")
 
 
 def _mission_path(missions_dir: Path, mission: dict[str, Any]) -> Path:
@@ -8824,6 +9579,19 @@ def load_missions(missions_dir: Path | str) -> list[dict[str, Any]]:
     for path in sorted(directory.glob("*.json")):
         missions.append(load_json(path))
     return missions
+
+
+def _authorized_cli_writer(args: argparse.Namespace) -> tuple[dict[str, Any], str]:
+    _require_canonical_live_mutation_paths(args)
+    coordinator_state = load_json(args.coordinator_state)
+    actor_task_id = require_primary_coordinator_writer(coordinator_state)
+    supplied_owner = str(getattr(args, "owner_task_id", None) or "").strip()
+    if supplied_owner and supplied_owner != actor_task_id:
+        raise ProtocolError(
+            "owner-task-id must match the current CODEX_THREAD_ID; caller "
+            "identity cannot be delegated"
+        )
+    return coordinator_state, actor_task_id
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -8875,11 +9643,19 @@ def build_parser() -> argparse.ArgumentParser:
     compile_parser = sub.add_parser("compile-work-order")
     compile_parser.add_argument("--mission", required=True, type=Path)
     compile_parser.add_argument("--output", required=True, type=Path)
+    compile_parser.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    compile_parser.add_argument("--dry-run", action="store_true")
 
     migrate = sub.add_parser("migrate")
     migrate.add_argument("--legacy", required=True, type=Path)
     migrate.add_argument("--output", required=True, type=Path)
     migrate.add_argument("--report", required=True, type=Path)
+    migrate.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    migrate.add_argument("--dry-run", action="store_true")
 
     migrate_ux = sub.add_parser("migrate-coordinator-ux")
     migrate_ux.add_argument("--registry", type=Path, default=DEFAULT_BINDINGS)
@@ -8902,7 +9678,23 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_scheduler.add_argument(
         "--output", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
+    migrate_scheduler.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
     migrate_scheduler.add_argument("--dry-run", action="store_true")
+
+    writer_rebind = sub.add_parser("coordinator-writer-rebind")
+    writer_rebind.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    writer_rebind.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    writer_rebind.add_argument("--expected-current-task-id", required=True)
+    writer_rebind.add_argument("--new-task-id", required=True)
+    writer_rebind.add_argument("--reason", required=True)
+    writer_rebind.add_argument("--confirm", required=True)
+    writer_rebind.add_argument("--dry-run", action="store_true")
 
     validate = sub.add_parser("validate")
     validate.add_argument("--registry", type=Path, default=DEFAULT_BINDINGS)
@@ -8921,15 +9713,24 @@ def build_parser() -> argparse.ArgumentParser:
     mission_init = sub.add_parser("mission-init")
     mission_init.add_argument("--payload", required=True, type=Path)
     mission_init.add_argument("--missions-dir", type=Path, default=DEFAULT_MISSIONS)
+    mission_init.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
 
     mission_event = sub.add_parser("mission-event")
     mission_event.add_argument("--mission", required=True, type=Path)
     mission_event.add_argument("--event", required=True)
     mission_event.add_argument("--payload", type=Path)
+    mission_event.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
 
     mission_blocker_contract = sub.add_parser("mission-blocker-contract")
     mission_blocker_contract.add_argument("--mission", required=True, type=Path)
     mission_blocker_contract.add_argument("--payload", required=True, type=Path)
+    mission_blocker_contract.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
 
     mission_continue = sub.add_parser("mission-continue")
     mission_continue.add_argument("--prior", required=True, type=Path)
@@ -8937,12 +9738,18 @@ def build_parser() -> argparse.ArgumentParser:
     mission_continue.add_argument(
         "--missions-dir", type=Path, default=DEFAULT_MISSIONS
     )
+    mission_continue.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
 
     terminal = sub.add_parser("terminal")
     terminal.add_argument("--mission", required=True, type=Path)
     terminal.add_argument("--terminal-dir", type=Path, default=DEFAULT_TERMINALS)
     terminal.add_argument(
         "--ledger", type=Path, default=DEFAULT_NOTIFICATION_LEDGER
+    )
+    terminal.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
     )
     terminal.add_argument("--dry-run", action="store_true")
 
@@ -8975,6 +9782,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     portfolio_render.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    portfolio_render.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
     )
     portfolio_render.add_argument("--dry-run", action="store_true")
 
@@ -9024,6 +9834,9 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_prepare.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
+    coordinator_prepare.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
     coordinator_prepare.add_argument("--dry-run", action="store_true")
 
     coordinator_sent = sub.add_parser("coordinator-action-sent")
@@ -9034,6 +9847,9 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_sent.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
+    coordinator_sent.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
     coordinator_sent.add_argument("--dry-run", action="store_true")
 
     coordinator_complete = sub.add_parser("coordinator-action-complete")
@@ -9043,7 +9859,9 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_complete.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
-    coordinator_complete.add_argument("--coordinator-state", type=Path)
+    coordinator_complete.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
     coordinator_complete.add_argument("--dry-run", action="store_true")
 
     coordinator_release = sub.add_parser("coordinator-action-release")
@@ -9051,6 +9869,9 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_release.add_argument("--reason", required=True)
     coordinator_release.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    coordinator_release.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
     )
     coordinator_release.add_argument("--dry-run", action="store_true")
 
@@ -9290,6 +10111,7 @@ def main(argv: list[str] | None = None) -> int:
                         missions=missions,
                     )
                 if not args.dry_run and result.get("registry_changed"):
+                    _authorized_cli_writer(args)
                     atomic_write_json(args.registry, registry)
                     atomic_write_json(args.hosts, hosts)
             result["dry_run"] = bool(args.dry_run)
@@ -9306,25 +10128,57 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         if args.command == "compile-work-order":
+            _authorized_cli_writer(args)
             packet = compile_work_order(load_json(args.mission))
-            atomic_write_json(args.output, packet)
+            if not args.dry_run:
+                atomic_write_json(args.output, packet)
             _json_stdout(
                 {
                     "classification": "COMPILED",
                     "output": str(args.output),
                     "packet_sha256": packet["packet_sha256"],
+                    "dry_run": bool(args.dry_run),
                 }
             )
             return 0
 
         if args.command == "migrate":
+            _authorized_cli_writer(args)
             registry, report = migrate_legacy_registry(load_json(args.legacy))
-            atomic_write_json(args.output, registry)
-            atomic_write_json(args.report, report)
+            if not args.dry_run:
+                atomic_write_json(args.output, registry)
+                atomic_write_json(args.report, report)
+            report["dry_run"] = bool(args.dry_run)
             _json_stdout(report)
             return 0
 
+        if args.command == "coordinator-writer-rebind":
+            _require_exact_cli_path(
+                args, "coordinator_state", DEFAULT_COORDINATOR_STATE
+            )
+            _require_exact_cli_path(
+                args, "scheduler_state", DEFAULT_SCHEDULER_STATE
+            )
+            coordinator_state = load_json(args.coordinator_state)
+            scheduler_state = load_scheduler_state(args.scheduler_state)
+            result = rebind_primary_coordinator_writer(
+                coordinator_state,
+                scheduler_state,
+                expected_current_task_id=args.expected_current_task_id,
+                new_task_id=args.new_task_id,
+                reason=args.reason,
+                confirmation=args.confirm,
+            )
+            if not args.dry_run:
+                validate_coordinator_state(coordinator_state)
+                atomic_write_json(args.coordinator_state, coordinator_state)
+            result["dry_run"] = bool(args.dry_run)
+            _json_stdout(result)
+            return 0
+
         if args.command == "migrate-coordinator-ux":
+            if not args.dry_run:
+                _authorized_cli_writer(args)
             current_state = (
                 load_json(args.coordinator_state)
                 if args.coordinator_state.exists()
@@ -9343,6 +10197,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "migrate-scheduler-state":
+            if not args.dry_run:
+                _authorized_cli_writer(args)
             if not args.input.is_file():
                 raise ProtocolError(f"scheduler migration input is missing: {args.input}")
             raw_scheduler_state = load_json(args.input)
@@ -9417,7 +10273,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "authorized-runtime-action-register":
-            coordinator_state = load_json(args.coordinator_state)
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             registry = load_json(args.registry)
             hosts = load_json(args.hosts)
             adapter = load_json(args.adapter)
@@ -9431,6 +10287,7 @@ def main(argv: list[str] | None = None) -> int:
                 hosts=hosts,
                 adapter=adapter,
                 scheduler_state=scheduler_state,
+                actor_task_id=actor_task_id,
             )
             validate_coordinator_state(coordinator_state)
             if not args.dry_run:
@@ -9440,7 +10297,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "mission-init":
-            mission = new_mission(load_json(args.payload))
+            _authorized_cli_writer(args)
+            mission_payload = load_json(args.payload)
+            require_new_mission_value_contract(mission_payload)
+            mission = new_mission(mission_payload)
             path = _mission_path(args.missions_dir, mission)
             if path.exists():
                 raise ProtocolError(f"Mission attempt already exists: {path}")
@@ -9449,10 +10309,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "mission-event":
+            _authorized_cli_writer(args)
             mission = load_json(args.mission)
             payload = load_json(args.payload) if args.payload else {}
             event = args.event
-            if event in {name for _, name in LINEAR_EVENTS}:
+            event_result: dict[str, Any] | None = None
+            if event == "value_contract_admitted":
+                event_result = admit_mission_value_contract(
+                    mission, payload.get("value_contract")
+                )
+            elif event in {name for _, name in LINEAR_EVENTS}:
                 advance_linear(mission, event, payload)
             elif event == "worker_dispatched":
                 dispatch_worker(mission, str(payload.get("work_order_sha256", "")))
@@ -9476,17 +10342,22 @@ def main(argv: list[str] | None = None) -> int:
             validate_mission(mission)
             atomic_write_json(args.mission, mission)
             _json_stdout(
-                {"classification": "MISSION_UPDATED", "state": mission["state"]}
+                event_result
+                or {"classification": "MISSION_UPDATED", "state": mission["state"]}
             )
             return 0
 
         if args.command == "mission-blocker-contract":
+            _authorized_cli_writer(args)
             _json_stdout(persist_blocked_contract(args.mission, args.payload))
             return 0
 
         if args.command == "mission-continue":
+            _authorized_cli_writer(args)
             prior = load_json(args.prior)
-            next_mission = start_continuation(prior, load_json(args.payload))
+            continuation_payload = load_json(args.payload)
+            require_new_mission_value_contract(continuation_payload)
+            next_mission = start_continuation(prior, continuation_payload)
             path = _mission_path(args.missions_dir, next_mission)
             if path.exists():
                 raise ProtocolError(f"Mission attempt already exists: {path}")
@@ -9504,6 +10375,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "terminal":
+            if not args.dry_run:
+                _authorized_cli_writer(args)
             mission = load_json(args.mission)
             validate_mission(mission)
             result = emit_terminal_packet(
@@ -9516,6 +10389,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "portfolio-render":
+            if not args.dry_run:
+                _authorized_cli_writer(args)
             portfolio = load_json(args.input)
             scheduler_state = load_scheduler_state(args.scheduler_state)
             validate_portfolio_scheduler_consistency(portfolio, scheduler_state)
@@ -9563,11 +10438,18 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
             if args.command == "coordinator-action-claim":
+                coordinator_state, actor_task_id = _authorized_cli_writer(args)
+                supplied_owner = str(args.owner_task_id or "").strip()
+                if supplied_owner and supplied_owner != actor_task_id:
+                    raise ProtocolError(
+                        "owner-task-id must match the current CODEX_THREAD_ID; "
+                        "caller identity cannot be delegated"
+                    )
                 result = claim_coordinator_action(
                     scheduler_state,
                     plan,
                     args.action_id,
-                    owner_task_id=args.owner_task_id,
+                    owner_task_id=actor_task_id,
                 )
                 if not args.dry_run:
                     atomic_write_json(args.scheduler_state, scheduler_state)
@@ -9578,6 +10460,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "coordinator-action-sent":
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             scheduler_state = load_scheduler_state(args.scheduler_state)
             result = mark_coordinator_action_sent(
                 scheduler_state,
@@ -9585,6 +10468,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.recipient_thread_id,
                 packet_sha256=args.packet_sha256,
                 after_cursor=args.after_cursor,
+                actor_task_id=actor_task_id,
             )
             if not args.dry_run:
                 atomic_write_json(args.scheduler_state, scheduler_state)
@@ -9593,12 +10477,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "coordinator-action-prepare":
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             scheduler_state = load_scheduler_state(args.scheduler_state)
             result = prepare_coordinator_action_delivery(
                 scheduler_state,
                 args.action_id,
                 args.recipient_thread_id,
                 args.packet_sha256,
+                actor_task_id=actor_task_id,
             )
             if not args.dry_run:
                 atomic_write_json(args.scheduler_state, scheduler_state)
@@ -9607,25 +10493,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "coordinator-action-complete":
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             scheduler_state = load_scheduler_state(args.scheduler_state)
-            coordinator_state = (
-                load_json(args.coordinator_state)
-                if args.coordinator_state is not None
-                else None
-            )
-            if coordinator_state is not None:
-                validate_coordinator_state(coordinator_state)
             result = complete_coordinator_action(
                 scheduler_state,
                 args.action_id,
                 args.outcome,
                 evidence=args.evidence,
                 coordinator_state=coordinator_state,
+                actor_task_id=actor_task_id,
             )
             if not args.dry_run:
-                if coordinator_state is not None:
-                    validate_coordinator_state(coordinator_state)
-                    atomic_write_json(args.coordinator_state, coordinator_state)
+                validate_coordinator_state(coordinator_state)
+                atomic_write_json(args.coordinator_state, coordinator_state)
                 atomic_write_json(args.scheduler_state, scheduler_state)
             result["dry_run"] = bool(args.dry_run)
             _json_stdout(result)
@@ -9637,7 +10517,7 @@ def main(argv: list[str] | None = None) -> int:
             "authorized-runtime-action-rollback",
             "authorized-runtime-action-reconcile-completion",
         }:
-            coordinator_state = load_json(args.coordinator_state)
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             scheduler_state = load_scheduler_state(args.scheduler_state)
             validate_coordinator_state(coordinator_state)
 
@@ -9654,6 +10534,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.action_id,
                     dry_run=args.dry_run,
                     persist_state=(None if args.dry_run else persist_runtime_state),
+                    actor_task_id=actor_task_id,
                 )
             elif args.command == "authorized-runtime-action-rollback":
                 result = rollback_authorized_runtime_action(
@@ -9662,6 +10543,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.action_id,
                     dry_run=args.dry_run,
                     persist_state=(None if args.dry_run else persist_runtime_state),
+                    actor_task_id=actor_task_id,
                 )
             else:
                 result = reconcile_authorized_runtime_completion(
@@ -9670,6 +10552,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.action_id,
                     dry_run=args.dry_run,
                     persist_state=(None if args.dry_run else persist_runtime_state),
+                    actor_task_id=actor_task_id,
                 )
             if not args.dry_run:
                 persist_runtime_state()
@@ -9678,9 +10561,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "coordinator-action-release":
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             scheduler_state = load_scheduler_state(args.scheduler_state)
             result = release_coordinator_action(
-                scheduler_state, args.action_id, args.reason
+                scheduler_state,
+                args.action_id,
+                args.reason,
+                actor_task_id=actor_task_id,
             )
             if not args.dry_run:
                 atomic_write_json(args.scheduler_state, scheduler_state)
@@ -9689,8 +10576,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "queue-coordinator-event":
-            coordinator_state = load_json(args.coordinator_state)
-            validate_coordinator_state(coordinator_state)
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             result = queue_coordinator_event(
                 coordinator_state,
                 kind=args.kind,
@@ -9705,8 +10591,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "ack-coordinator-event":
-            coordinator_state = load_json(args.coordinator_state)
-            validate_coordinator_state(coordinator_state)
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             result = acknowledge_coordinator_event_routed(
                 coordinator_state,
                 args.event_id,
@@ -9720,7 +10605,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "route-user-response":
             mission = load_json(args.mission)
-            coordinator_state = load_json(args.coordinator_state)
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             validate_mission(mission)
             validate_coordinator_state(coordinator_state)
             related_artifact: Any = None
@@ -9744,7 +10629,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "ack-user-response":
             mission = load_json(args.mission)
-            coordinator_state = load_json(args.coordinator_state)
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
             validate_mission(mission)
             validate_coordinator_state(coordinator_state)
             result = acknowledge_user_response_routed(

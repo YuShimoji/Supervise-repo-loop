@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/coordinator-plan.v2",
+  "title": "Coordinator multi-route deterministic plan v2",
+  "type": "object",
+  "required": [
+    "classification",
+    "state_fingerprint",
+    "scheduler_claim",
+    "ready_actions",
+    "required_handoff_actions",
+    "protocol_handoff_required",
+    "active_routes",
+    "wait_targets",
+    "concurrency_limit",
+    "capacity_remaining",
+    "round_robin_cursor_repository_id",
+    "next_action",
+    "has_ready_action",
+    "has_inflight_work",
+    "cycle_should_continue_now",
+    "cycle_checkpoint_allowed",
+    "checkpoint_after_wait_allowed",
+    "route_cursor_complete",
+    "checkpoint_blockers",
+    "watchdog_should_be_armed",
+    "watchdog_should_be_paused"
+  ],
+  "properties": {
+    "classification": {"const": "COORDINATOR_DETERMINISTIC_PLAN"},
+    "state_fingerprint": {"type": "string", "minLength": 64},
+    "scheduler_claim": {"type": ["object", "null"]},
+    "ready_actions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/action"}
+    },
+    "required_handoff_actions": {
+      "description": "Protocol-completion actions that must drain to the next exact external wait or terminal before a normal checkpoint.",
+      "type": "array",
+      "items": {"$ref": "#/$defs/action"}
+    },
+    "protocol_handoff_required": {"type": "boolean"},
+    "active_routes": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/activeRoute"}
+    },
+    "wait_targets": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/waitTarget"}
+    },
+    "concurrency_limit": {"type": "integer", "minimum": 1, "maximum": 8},
+    "capacity_remaining": {"type": "integer", "minimum": 0, "maximum": 8},
+    "round_robin_cursor_repository_id": {
+      "description": "Most recently admitted repository; equal-priority ready actions are ordered starting after it.",
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "next_action": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/action"}
+      ]
+    },
+    "has_ready_action": {"type": "boolean"},
+    "has_claimable_action": {"type": "boolean"},
+    "has_inflight_work": {"type": "boolean"},
+    "cycle_should_continue_now": {"type": "boolean"},
+    "cycle_checkpoint_allowed": {"type": "boolean"},
+    "checkpoint_after_wait_allowed": {
+      "description": "Structural foreground-handoff eligibility: true when a durable route lease remains, no scheduler claim exists, and no READY action is claimable. The executor must separately have completed its bounded wait; this field is not a wait receipt.",
+      "type": "boolean"
+    },
+    "route_cursor_complete": {
+      "description": "Every durable route lease has an exact wait cursor recorded.",
+      "type": "boolean"
+    },
+    "checkpoint_blockers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "scheduler_claim",
+          "claimable_ready_action",
+          "required_protocol_handoff",
+          "missing_route_cursor"
+        ]
+      }
+    },
+    "watchdog_should_be_armed": {"type": "boolean"},
+    "watchdog_should_be_paused": {"type": "boolean"},
+    "coordinator_lifecycle": {"const": "AVAILABLE"},
+    "coordinator_availability": {"const": "AVAILABLE"},
+    "execution_state": {
+      "enum": ["READY", "DRAINING", "WAITING_USER", "WAITING_EXTERNAL", "IDLE"]
+    },
+    "active_claim": {
+      "description": "Deprecated non-authoritative compatibility projection.",
+      "type": ["object", "null"]
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": [
+        "action_id",
+        "kind",
+        "priority",
+        "stable_order",
+        "requires_external_result",
+        "payload"
+      ],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "priority": {"type": "integer"},
+        "stable_order": {"type": "integer"},
+        "requires_external_result": {"type": "boolean"},
+        "payload": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "activeRoute": {
+      "type": "object",
+      "required": ["action_id", "repository_id", "status"],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "repository_id": {"type": "string"},
+        "mission_id": {"type": ["string", "null"]},
+        "attempt_id": {},
+        "status": {"enum": ["sent", "waiting"]},
+        "recipient_thread_id": {"type": ["string", "null"]},
+        "after_cursor": {"type": ["string", "null"]},
+        "route_class": {"enum": ["control", "execution"]},
+        "legacy_inferred_route": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "waitTarget": {
+      "type": "object",
+      "required": [
+        "action_id",
+        "action_ids",
+        "recipient_thread_id",
+        "after_cursor"
+      ],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "action_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "repository_id": {"type": ["string", "null"]},
+        "mission_id": {"type": ["string", "null"]},
+        "attempt_id": {},
+        "recipient_thread_id": {"type": "string", "minLength": 1},
+        "after_cursor": {"type": ["string", "null"]},
+        "delivery_token": {"type": ["string", "null"]},
+        "status": {"const": "waiting"},
+        "legacy_inferred_route": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

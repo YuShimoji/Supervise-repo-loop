@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/coordinator-state.v2",
+  "title": "Global Coordinator state v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "contract",
+    "user_visible_codex_entry_points",
+    "normal_user_input_surface",
+    "standard_prompts",
+    "active_repository_selector",
+    "pending_repository_ids",
+    "pending_user_responses",
+    "coordinator_task"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "contract": {
+      "const": "global-coordinator-only-v2"
+    },
+    "user_visible_codex_entry_points": {
+      "const": 1
+    },
+    "normal_user_input_surface": {
+      "const": "coordinator"
+    },
+    "standard_prompts": {
+      "type": "object",
+      "required": [
+        "this_repository",
+        "next_actionable_registered_repository"
+      ],
+      "properties": {
+        "this_repository": {
+          "const": "Use $supervise-repo-loop for this repository until terminal state."
+        },
+        "next_actionable_registered_repository": {
+          "const": "Use $supervise-repo-loop for the next actionable registered repository until terminal state."
+        }
+      },
+      "additionalProperties": false
+    },
+    "active_repository_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pending_repository_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pending_user_responses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "repository_id",
+          "mission_id",
+          "attempt_id"
+        ],
+        "properties": {
+          "repository_id": {"type": "string", "minLength": 1},
+          "mission_id": {"type": "string", "minLength": 1},
+          "attempt_id": {},
+          "terminal_route_being_resumed": {
+            "enum": ["USER_DECISION", "USER_ACTION"]
+          },
+          "response_id": {"type": "string", "minLength": 1},
+          "response_state": {"enum": ["ready_to_route"]},
+          "priority": {"const": 1},
+          "recipient_thread_id": {"type": "string", "minLength": 1},
+          "packet": {"type": "object"},
+          "queued_at": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "pending_user_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "kind",
+          "repository_id",
+          "raw_text",
+          "state"
+        ],
+        "properties": {
+          "event_id": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["direction_update", "project_question"]},
+          "repository_id": {"type": "string", "minLength": 1},
+          "mission_id": {"type": ["string", "null"]},
+          "raw_text": {"type": "string", "minLength": 1},
+          "state": {"const": "queued"},
+          "priority": {"enum": [1, 2]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "routed_user_events": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "routed_user_responses": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "active_user_card_id": {
+      "type": ["string", "null"]
+    },
+    "presentation_policy": {
+      "type": "object",
+      "properties": {
+        "all_terminal_stops_coordinator": {"const": false},
+        "automation_idle_policy": {"const": "paused"},
+        "automation_arm_condition": {
+          "const": "external_active_claim_or_exact_outbound_wait"
+        },
+        "cycle_mode": {"const": "event_driven_drain"},
+        "checkpoint_with_inflight": {"const": false},
+        "global_completion_barrier": {"const": false},
+        "heartbeat_role": {"const": "recovery_watchdog"},
+        "independent_project_resume": {"const": true},
+        "ongoing_rearm": {"const": false},
+        "review_cards_are_individual": {"const": true},
+        "review_gate_scope": {"const": "mission"},
+        "review_reply_order": {"const": "one_project_at_a_time"},
+        "show_user_terminal_immediately": {"const": true},
+        "user_reply_surface": {"const": "coordinator"},
+        "wait_for_inflight_exact_target": {"const": true}
+      },
+      "additionalProperties": true
+    },
+    "runtime_policy": {
+      "type": "object",
+      "properties": {
+        "recovery_automation_id": {"type": "string", "minLength": 1},
+        "scheduler": {"const": "deterministic-claim-drain-v1"},
+        "scheduler_state": {"type": "string", "minLength": 1},
+        "watchdog_default": {"const": "paused"}
+      },
+      "additionalProperties": false
+    },
+    "coordinator_task": {
+      "type": "object",
+      "required": [
+        "scope",
+        "task_id",
+        "binding_status"
+      ],
+      "properties": {
+        "scope": {
+          "const": "all_repositories"
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "binding_status": {
+          "enum": [
+            "active",
+            "needs_verification"
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

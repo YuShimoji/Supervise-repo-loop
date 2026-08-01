@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/coordinator-scheduler.v1",
+  "title": "Coordinator deterministic scheduler state v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "revision",
+    "active_claim",
+    "completed_actions"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "revision": {"type": "integer", "minimum": 0},
+    "active_claim": {
+      "type": ["object", "null"],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "action": {"type": "object"},
+        "status": {"enum": ["claimed", "prepared", "sent", "waiting"]},
+        "state_fingerprint": {"type": "string", "minLength": 1},
+        "owner_task_id": {"type": ["string", "null"]},
+        "recipient_thread_id": {"type": ["string", "null"]},
+        "packet_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "delivery_token": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "after_cursor": {"type": ["string", "null"]}
+      },
+      "required": ["action_id", "action", "status", "state_fingerprint"],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"enum": ["prepared", "sent", "waiting"]}},
+            "required": ["status"]
+          },
+          "then": {
+            "required": ["recipient_thread_id", "packet_sha256", "delivery_token"],
+            "properties": {
+              "recipient_thread_id": {"type": "string", "minLength": 1},
+              "packet_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$"
+              },
+              "delivery_token": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "completed_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action_id", "kind", "state_fingerprint", "outcome"],
+        "properties": {
+          "action_id": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1},
+          "requires_external_result": {"type": "boolean"},
+          "state_fingerprint": {"type": "string", "minLength": 1},
+          "outcome": {"type": "string", "minLength": 1},
+          "evidence": {"type": ["string", "null"]},
+          "recipient_thread_id": {"type": ["string", "null"]},
+          "packet_sha256": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-fA-F]{64}$"
+          },
+          "delivery_token": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-fA-F]{64}$"
+          },
+          "after_cursor": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true,
+        "allOf": [
+          {
+            "if": {
+              "properties": {"requires_external_result": {"const": true}},
+              "required": ["requires_external_result"]
+            },
+            "then": {
+              "required": [
+                "recipient_thread_id",
+                "packet_sha256",
+                "delivery_token",
+                "evidence"
+              ],
+              "properties": {
+                "recipient_thread_id": {"type": "string", "minLength": 1},
+                "packet_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{64}$"
+                },
+                "delivery_token": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{64}$"
+                },
+                "evidence": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        ]
+      }
+    },
+    "released_claims": {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  },
+  "additionalProperties": false
+}

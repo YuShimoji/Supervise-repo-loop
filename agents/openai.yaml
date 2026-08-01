@@ -1,0 +1,7 @@
+interface:
+  display_name: "リポジトリ監修ループ v2"
+  short_description: "One Coordinator for routed repository supervision"
+  default_prompt: "Use $supervise-repo-loop for this repository until terminal state."
+
+policy:
+  allow_implicit_invocation: false

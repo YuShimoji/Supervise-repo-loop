@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/coordinator-scheduler.v2",
+  "title": "Coordinator multi-route scheduler state v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "revision",
+    "concurrency_limit",
+    "scheduler_claim",
+    "route_leases",
+    "completed_actions"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "revision": {"type": "integer", "minimum": 0},
+    "concurrency_limit": {"type": "integer", "minimum": 1, "maximum": 8},
+    "round_robin_cursor_repository_id": {
+      "description": "Most recently admitted repository; equal-priority selection resumes after it. Optional only for backward compatibility with early v2 state.",
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "scheduler_claim": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/schedulerClaim"}
+      ]
+    },
+    "route_leases": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/routeLease"}
+    },
+    "completed_actions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/completedAction"}
+    },
+    "released_claims": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "migration": {
+      "type": "object",
+      "properties": {
+        "from_schema_version": {"const": 1},
+        "preserved_active_route": {"type": "boolean"}
+      },
+      "required": ["from_schema_version", "preserved_active_route"],
+      "additionalProperties": false
+    },
+    "active_claim": {
+      "description": "Deprecated non-authoritative compatibility projection.",
+      "type": ["object", "null"]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "baseActiveRecord": {
+      "type": "object",
+      "required": [
+        "action_id",
+        "action",
+        "status",
+        "state_fingerprint",
+        "repository_id",
+        "route_class"
+      ],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "action": {"type": "object"},
+        "status": {"type": "string"},
+        "state_fingerprint": {"type": "string", "minLength": 1},
+        "repository_id": {"type": "string"},
+        "mission_id": {"type": ["string", "null"]},
+        "attempt_id": {},
+        "route_class": {"enum": ["local", "control", "execution"]},
+        "owner_task_id": {"type": ["string", "null"]},
+        "recipient_thread_id": {"type": ["string", "null"]},
+        "packet_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "delivery_token": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "after_cursor": {"type": ["string", "null"]},
+        "claimed_at": {"type": "string"},
+        "prepared_at": {"type": "string"},
+        "sent_at": {"type": "string"},
+        "leased_at": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "schedulerClaim": {
+      "allOf": [
+        {"$ref": "#/$defs/baseActiveRecord"},
+        {
+          "properties": {"status": {"enum": ["claimed", "prepared"]}},
+          "required": ["status"],
+          "allOf": [
+            {
+              "if": {
+                "properties": {"status": {"const": "prepared"}},
+                "required": ["status"]
+              },
+              "then": {
+                "required": [
+                  "recipient_thread_id",
+                  "packet_sha256",
+                  "delivery_token"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "routeLease": {
+      "allOf": [
+        {"$ref": "#/$defs/baseActiveRecord"},
+        {
+          "properties": {"status": {"enum": ["sent", "waiting"]}},
+          "required": [
+            "status",
+            "recipient_thread_id",
+            "packet_sha256",
+            "delivery_token"
+          ]
+        }
+      ]
+    },
+    "completedAction": {
+      "type": "object",
+      "required": ["action_id", "kind", "state_fingerprint", "outcome"],
+      "properties": {
+        "action_id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "requires_external_result": {"type": "boolean"},
+        "state_fingerprint": {"type": "string", "minLength": 1},
+        "outcome": {"type": "string", "minLength": 1},
+        "evidence": {"type": ["string", "null"]},
+        "repository_id": {"type": ["string", "null"]},
+        "route_class": {"type": ["string", "null"]},
+        "recipient_thread_id": {"type": ["string", "null"]},
+        "packet_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "delivery_token": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "after_cursor": {"type": ["string", "null"]},
+        "completed_at": {"type": "string"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

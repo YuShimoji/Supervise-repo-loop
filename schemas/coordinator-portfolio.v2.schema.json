@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/coordinator-portfolio.v2",
+  "title": "Coordinator graphical portfolio status v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "semantic_fingerprint",
+    "coordinator_availability",
+    "execution_state",
+    "active_route_count",
+    "concurrency_limit",
+    "repositories"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "semantic_fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "coordinator_availability": {"const": "AVAILABLE"},
+    "execution_state": {
+      "enum": ["READY", "DRAINING", "WAITING_USER", "WAITING_EXTERNAL", "IDLE", "SAFETY_CEILING"]
+    },
+    "active_route_count": {"type": "integer", "minimum": 0},
+    "concurrency_limit": {"type": "integer", "minimum": 1, "maximum": 8},
+    "repositories": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/repository"}
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "stage": {
+      "enum": [
+        "MISSION",
+        "WORK_ORDER",
+        "WORKER",
+        "WORKER_REPORT",
+        "SUPERVISOR",
+        "VERDICT",
+        "NEXT_ROUTE"
+      ]
+    },
+    "introducedBy": {
+      "type": "object",
+      "required": ["event", "at", "evidence"],
+      "properties": {
+        "event": {"type": "string", "minLength": 1},
+        "at": {"type": "string", "minLength": 1},
+        "evidence": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    },
+    "stop": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "blocker_id",
+        "introduced_by",
+        "requirement",
+        "rationale",
+        "qualifies_when",
+        "does_not_qualify",
+        "diagnostics_completed",
+        "owner",
+        "next_permitted_probe",
+        "retry_policy",
+        "input_route",
+        "baseline_observation_fingerprint"
+      ],
+      "properties": {
+        "contract_version": {"const": 2},
+        "blocker_id": {"type": "string", "minLength": 1},
+        "introduced_by": {"$ref": "#/$defs/introducedBy"},
+        "requirement": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "qualifies_when": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "does_not_qualify": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "diagnostics_completed": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "owner": {"type": "string", "minLength": 1},
+        "next_permitted_probe": {"type": "string", "minLength": 1},
+        "retry_policy": {"type": "string", "minLength": 1},
+        "input_route": {
+          "type": "object",
+          "required": ["destination", "format"],
+          "properties": {
+            "destination": {"type": "string", "minLength": 1},
+            "format": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": true
+        },
+        "baseline_observation_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        }
+      },
+      "additionalProperties": true
+    },
+    "repository": {
+      "type": "object",
+      "required": [
+        "repository_id",
+        "project_name",
+        "state",
+        "progress",
+        "why",
+        "owner",
+        "next_move"
+      ],
+      "properties": {
+        "repository_id": {"type": "string", "minLength": 1},
+        "project_name": {"type": "string", "minLength": 1},
+        "state": {
+          "enum": [
+            "RUNNING",
+            "READY",
+            "WAITING_USER",
+            "WAITING_EXTERNAL",
+            "SYSTEM_BLOCKED",
+            "MISSION_COMPLETE_NEXT_UNSELECTED",
+            "PARKED_BY_POLICY",
+            "PROJECT_COMPLETE"
+          ]
+        },
+        "progress": {
+          "type": "object",
+          "required": ["current_stage", "completed_stages"],
+          "properties": {
+            "current_stage": {"$ref": "#/$defs/stage"},
+            "completed_stages": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/stage"}
+            },
+            "stage_labels": {"type": "object"}
+          },
+          "additionalProperties": true
+        },
+        "why": {"type": "string", "minLength": 1},
+        "owner": {"type": "string", "minLength": 1},
+        "next_move": {"type": "string", "minLength": 1},
+        "stop": {"$ref": "#/$defs/stop"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {"enum": ["SYSTEM_BLOCKED", "PARKED_BY_POLICY"]}
+            },
+            "required": ["state"]
+          },
+          "then": {"required": ["stop"]}
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

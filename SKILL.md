@@ -27,6 +27,31 @@ terminal packets. If the normal Python launcher is unavailable, load the Codex
 workspace dependencies and use the bundled Python. Do not install a runtime or
 package.
 
+## Primary writer fence
+
+Exactly one active Coordinator task may write live orchestration state. Its
+identity is `coordinator_state.coordinator_task.task_id`; every mutating CLI
+invocation must run in that same task, require the process `CODEX_THREAD_ID` to
+match it, and use the canonical paths under the installed skill's `state/` for
+the Coordinator record, scheduler, Missions/events, and portfolio projections.
+A caller-selected state clone is a test fixture, never an alternate live state
+authority.
+
+Repair, audit, reporting, Prompt-design, and development tasks whose task ID is
+not the active binding are read-only for live state. They may inspect or test
+static copies, but must not claim, prepare, send, complete, release, register or
+execute runtime recovery, change a Mission/event, or render the canonical live
+portfolio. Never copy, pass, or rewrite the primary ID to impersonate it.
+
+This is a cooperative operational fence, not a malicious-security boundary:
+`CODEX_THREAD_ID` and local files are visible to processes running as the same
+OS user. Strong isolation against a deliberately hostile full-access process
+would require an external credential or service boundary. Rebinding the
+primary is a distinct, explicit administrator operation allowed only at a
+verified idle edge with no scheduler claim, prepared delivery, route lease, or
+recovery-owned runtime phase. Record the old/new identities and authority; a
+repair or recovery wake must never rebind implicitly.
+
 ## Fixed user triggers
 
 Use these strings unchanged:
@@ -60,6 +85,11 @@ portfolio index named by [coordinator-task-prompt.md](references/coordinator-tas
 Update it only for a semantic transition, generate its Markdown with
 `portfolio-render`, and embed the same compact seven-stage Mermaid graph in
 every state-changing or explicit status response before linking the index. A
+publishable status also contains top-level `next_user_action` as one complete
+card or `null`, plus each repository's named overall/current/completed/next
+roadmap blocks, next gate, and completion definition. Never invent a progress
+percentage or leave a `WAITING_USER` row without its entrypoint, requirements,
+reply format, post-reply behavior, and non-escalation boundary. A
 route-set change is semantic. Before checkpointing, require the portfolio's
 scheduler revision, concurrency, active-route count, and exact structured route
 set to match the scheduler state used for the response; a stale projection is a
@@ -201,6 +231,33 @@ Coordinator availability remains `AVAILABLE`; execution separately reports
 route lease is `DRAINING`. Only a persisted exact send receipt is in flight.
 In-flight work and ready capacity may coexist. `all_current_missions_terminal`
 never means Coordinator completion.
+
+## Mission admission and quick-win priority
+
+Drain mandatory receipts and exact protocol handoffs before selecting
+discretionary new work. A new or continued Mission is admissible only when its
+value contract cites the current repository authority revision/fingerprint and
+`current_next_action`, then names a concrete `gate_delta` showing how the
+smallest deliverable moves that exact gate. Default to one Worker turn and at
+most two; a larger slice must explain why a smaller one cannot create usable
+value.
+
+Reuse or finish the current artifact before creating another source, story,
+form, benchmark, or candidate. If reuse is impossible, name the existing
+consumer, the missing property, and why a new artifact is the smallest route to
+the gate. A technically interesting result, generic capability proof, or
+different topic used only to demonstrate generalization is not sufficient.
+
+Any new artifact, source, story, form, or candidate—and every genre/domain
+shift, parallel product direction, exploratory Mission, or strategic bet—
+requires explicit user authorization bound in the value contract. Without it,
+request a smaller aligned Work Order, return `NO_WORK`, or park the proposal;
+do not dispatch it as a quick win. Completion of a legacy Mission does not
+authorize an uncontracted successor. An uncontracted legacy Mission that would
+otherwise advance or dispatch must project `resolve_mission_value_gate` to its
+exact Supervisor. Admit a corrected contract once through the replay-safe
+`value_contract_admitted` event, or record `NO_WORK`/park; never overwrite an
+admitted contract.
 
 ## Ongoing Coordinator cycles
 

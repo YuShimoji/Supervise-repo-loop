@@ -209,3 +209,19 @@
 - Effect: “authorization satisfied” can no longer coexist indefinitely with
   zero scheduler actions. Arbitrary shell repair remains forbidden, crash
   recovery is idempotent, and unrelated project routes remain independent.
+
+## D-020 — Transfer scheduler code, recreate scheduler bindings
+
+- Date: 2026-08-02
+- Decision: Git transfers the static Coordinator implementation, schemas,
+  tests, recovery prompt, and automation portability manifest. Installed live
+  `state/`, automation records, primary task IDs, host paths, one-time gates,
+  helper caches, and checkpoints remain host-local. A new host creates or
+  selects its own exact primary Coordinator and attaches a new recovery
+  heartbeat in `PAUSED`; it never copies an old target task ID. The heartbeat
+  may become active only when that host's deterministic plan reports
+  `watchdog_should_be_armed=true`.
+- Effect: a clone can reproduce the development and scheduling structure
+  without creating two live writers or silently pointing recovery at a task
+  on another machine. Git reflection remains distinct from in-flight live-state
+  migration.

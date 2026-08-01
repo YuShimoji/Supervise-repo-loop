@@ -776,6 +776,19 @@ class SuperviseRepoLoopV2Tests(unittest.TestCase):
         )
         self.assertEqual(result["terminal_route"], "USER_ACTION")
 
+    def test_json_stdout_falls_back_to_ascii_on_cp932(self) -> None:
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding="cp932", newline="\n")
+        with contextlib.redirect_stdout(stream):
+            loop._json_stdout({"path": "Residual Atlas — First Playable"})
+            stream.flush()
+        rendered = raw.getvalue().decode("cp932")
+        self.assertEqual(
+            json.loads(rendered),
+            {"path": "Residual Atlas — First Playable"},
+        )
+        self.assertIn("\\u2014", rendered)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

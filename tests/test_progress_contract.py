@@ -112,6 +112,32 @@ def active_route_record(
     }
 
 
+def roadmap(position: str = "Delivery validation") -> dict:
+    return {
+        "overall_position": position,
+        "current_block": "Current exact route",
+        "completed_blocks": ["Authority intake"],
+        "next_blocks": ["Consume exact result"],
+        "completion_definition": "The named project gate is accepted.",
+        "next_gate": "Exact route result",
+    }
+
+
+def user_action(repository_id: str) -> dict:
+    return {
+        "repository_id": repository_id,
+        "kind": "USER_DECISION",
+        "purpose": "Decide the exact current artifact gate.",
+        "why_now": "This project alone is waiting for a user verdict.",
+        "entrypoint": "X:\\fixtures\\review\\index.html",
+        "requirements": ["Open the exact artifact", "Reply with one verdict"],
+        "reply_format": "accept, or reject: reason",
+        "owner": "User",
+        "post_reply_behavior": "Resume only this Mission through its Supervisor.",
+        "non_escalation_boundary": "No release or publication is authorized.",
+    }
+
+
 def scheduler_and_portfolio_with_active_routes() -> tuple[dict, dict]:
     waiting = active_route_record(
         REPO_A,
@@ -152,6 +178,7 @@ def scheduler_and_portfolio_with_active_routes() -> tuple[dict, dict]:
         "active_route_count": 2,
         "concurrency_limit": 3,
         "active_routes": active_routes,
+        "next_user_action": None,
         "repositories": [
             {
                 "repository_id": REPO_A,
@@ -166,6 +193,7 @@ def scheduler_and_portfolio_with_active_routes() -> tuple[dict, dict]:
                         "WORKER_REPORT",
                     ],
                 },
+                "roadmap": roadmap("Supervisor adjudication"),
                 "why": "The exact Supervisor route is waiting.",
                 "owner": "exact Supervisor",
                 "route_owner": (
@@ -183,6 +211,7 @@ def scheduler_and_portfolio_with_active_routes() -> tuple[dict, dict]:
                     "current_stage": "NEXT_ROUTE",
                     "completed_stages": list(loop.PORTFOLIO_STAGE_ORDER[:-1]),
                 },
+                "roadmap": roadmap("Prepared next route"),
                 "why": "The exact delivery is durably prepared.",
                 "owner": "exact Supervisor",
                 "route_owner": (
@@ -314,6 +343,7 @@ class ProgressAndStopContractTests(unittest.TestCase):
             "execution_state": "DRAINING",
             "active_route_count": 1,
             "concurrency_limit": 3,
+            "next_user_action": None,
             "repositories": [
                 {
                     "repository_id": REPO_A,
@@ -328,6 +358,7 @@ class ProgressAndStopContractTests(unittest.TestCase):
                             "WORKER_REPORT",
                         ],
                     },
+                    "roadmap": roadmap("Supervisor adjudication"),
                     "why": "Worker Report was sent for adjudication.",
                     "owner": "exact Supervisor",
                     "next_move": "Return one verdict.",
@@ -340,6 +371,7 @@ class ProgressAndStopContractTests(unittest.TestCase):
                         "current_stage": "NEXT_ROUTE",
                         "completed_stages": list(loop.PORTFOLIO_STAGE_ORDER[:-1]),
                     },
+                    "roadmap": roadmap("Blocked at source gate"),
                     "why": "The source bundle is incomplete.",
                     "owner": "source owner",
                     "next_move": "Supply the named bundle through the Coordinator.",
@@ -355,6 +387,10 @@ class ProgressAndStopContractTests(unittest.TestCase):
         self.assertIn("Qualifies when", first)
         self.assertIn("Does not qualify", first)
         self.assertIn("Diagnostics already completed", first)
+        self.assertIn("## Next user action", first)
+        self.assertIn("Coordinator can continue without user input", first)
+        self.assertIn("## Project roadmap position", first)
+        self.assertIn("Supervisor adjudication", first)
 
     def test_T94_newer_supervisor_contract_revision_is_historical_and_current(self) -> None:
         registry, hosts, adapter, coordinator = fixture()
@@ -644,6 +680,9 @@ class ProgressAndStopContractTests(unittest.TestCase):
                     "execution_state": state,
                     "active_route_count": 1,
                     "concurrency_limit": 3,
+                    "next_user_action": (
+                        user_action(REPO_A) if state == "WAITING_USER" else None
+                    ),
                     "repositories": [
                         {
                             "repository_id": REPO_A,
@@ -655,6 +694,7 @@ class ProgressAndStopContractTests(unittest.TestCase):
                                     loop.PORTFOLIO_STAGE_ORDER[:-1]
                                 ),
                             },
+                            "roadmap": roadmap("Exact external route"),
                             "why": "An exact external result is pending.",
                             "owner": "exact route recipient",
                             "next_move": "Consume the exact result once.",
@@ -667,11 +707,30 @@ class ProgressAndStopContractTests(unittest.TestCase):
                     "current" if state == "WAITING_EXTERNAL" else "parked"
                 )
                 self.assertIn(f'["NEXT ROUTE"]:::{expected_class}', rendered)
+                if state == "WAITING_USER":
+                    self.assertIn("Decide the exact current artifact gate", rendered)
+                    self.assertIn("accept, or reject: reason", rendered)
 
         blocked = copy.deepcopy(portfolio)
         blocked["repositories"][0]["state"] = "SYSTEM_BLOCKED"
+        blocked["next_user_action"] = None
         with self.assertRaisesRegex(loop.ProtocolError, "non-empty recovery contract"):
             loop.render_portfolio_markdown(blocked)
+
+    def test_T143_portfolio_fails_closed_on_incomplete_user_or_roadmap_context(
+        self,
+    ) -> None:
+        _, portfolio = scheduler_and_portfolio_with_active_routes()
+        missing_roadmap = copy.deepcopy(portfolio)
+        del missing_roadmap["repositories"][0]["roadmap"]
+        with self.assertRaisesRegex(loop.ProtocolError, "roadmap is required"):
+            loop.validate_portfolio_status(missing_roadmap)
+
+        waiting_user = copy.deepcopy(portfolio)
+        waiting_user["repositories"][0]["state"] = "WAITING_USER"
+        waiting_user["next_user_action"] = None
+        with self.assertRaisesRegex(loop.ProtocolError, "complete next_user_action"):
+            loop.validate_portfolio_status(waiting_user)
 
     def test_T102_portfolio_scheduler_gate_accepts_exact_active_routes(self) -> None:
         scheduler, portfolio = scheduler_and_portfolio_with_active_routes()
@@ -760,12 +819,16 @@ class ProgressAndStopContractTests(unittest.TestCase):
             directory = Path(temporary)
             portfolio_path = directory / "portfolio.json"
             scheduler_path = directory / "scheduler.json"
+            coordinator_path = directory / "coordinator.json"
             output_path = directory / "portfolio.md"
             portfolio_path.write_text(
                 json.dumps(portfolio, ensure_ascii=False), encoding="utf-8"
             )
             scheduler_path.write_text(
                 json.dumps(scheduler, ensure_ascii=False), encoding="utf-8"
+            )
+            coordinator_path.write_text(
+                json.dumps(fixture()[3], ensure_ascii=False), encoding="utf-8"
             )
             errors = io.StringIO()
             with redirect_stderr(errors):
@@ -778,6 +841,8 @@ class ProgressAndStopContractTests(unittest.TestCase):
                         str(output_path),
                         "--scheduler-state",
                         str(scheduler_path),
+                        "--coordinator-state",
+                        str(coordinator_path),
                     ]
                 )
             self.assertEqual(result, 2)

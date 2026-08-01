@@ -8,7 +8,14 @@ with the prose and reject a runtime that cannot expose the required plan fields.
 
 ```json
 {
-  "contract_version": 5,
+  "contract_version": 7,
+  "writer": {
+    "mode": "single_bound_primary_task",
+    "actor_identity_source": "CODEX_THREAD_ID",
+    "binding_source": "coordinator_state.coordinator_task.task_id",
+    "secondary_repair_and_audit_tasks": "read_only_live_state",
+    "identity_delegation": false
+  },
   "scheduler": {
     "claim_model": "scheduler_claim_plus_route_leases",
     "configured_external_route_capacity": 3,
@@ -48,6 +55,8 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "update_policy": "semantic_change_only",
     "renderer": "portfolio-render",
     "graph": "mermaid_inline_and_markdown_index",
+    "next_user_action": "one_complete_card_or_null",
+    "roadmap_position_per_repository": true,
     "status_query": "consume_observed_results_and_drain_required_handoffs_before_answer",
     "checkpoint_consistency": {
       "source": "same_scheduler_revision_and_active_route_set",
@@ -79,6 +88,49 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "receipt_before_routing": true,
     "worker_direct_route": false
   },
+  "mission_admission": {
+    "default": "quick_win",
+    "mandatory_handoffs_precede_discretionary_work": true,
+    "required_contract": "value_contract_v1",
+    "value_contract_v1_fields": [
+      "authority_source",
+      "authority_revision",
+      "authority_fingerprint",
+      "authority_next_action",
+      "north_star",
+      "current_bottleneck",
+      "current_gate",
+      "gate_delta",
+      "expected_authority_state_after",
+      "expected_user_value",
+      "smallest_deliverable",
+      "next_consumer",
+      "reuse_or_integration",
+      "existing_artifact_reused",
+      "creates_new_artifact",
+      "new_source_story_form_or_candidate",
+      "advances_current_next_action",
+      "adoption_test",
+      "kill_condition",
+      "objective_fit",
+      "work_class",
+      "max_worker_turns",
+      "genre_or_domain_shift",
+      "out_of_scope"
+    ],
+    "max_worker_turns": 2,
+    "non_quick_requires": "why_not_smaller",
+    "genre_domain_or_exploratory_shift_requires": "explicit_user_authorization_evidence",
+    "missing_or_invalid_contract": "MISSION_VALUE_GATE",
+    "legacy_uncontracted_action": "resolve_mission_value_gate",
+    "legacy_contract_admission_event": "value_contract_admitted",
+    "allowed_gate_resolutions": [
+      "admit_valid_value_contract",
+      "return_no_work",
+      "park_mission"
+    ],
+    "different_topic_alone_is_not_reuse": true
+  },
   "state_vocabulary": {
     "coordinator_availability": ["AVAILABLE"],
     "execution": [
@@ -104,6 +156,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "required_scheduler_schema": 2,
     "required_plan_fields": [
       "scheduler_claim",
+      "primary_writer_task_id",
       "active_routes",
       "ready_actions",
       "required_handoff_actions",
@@ -139,6 +192,12 @@ Capability gate
   MIGRATION_REQUIRED once, and route the loop-infrastructure repair before
   claiming that portfolio concurrency is active.
 - Never emulate multiple routes with unpersisted chat memory.
+- Before any live mutation, require the process `CODEX_THREAD_ID` to equal the
+  active exact `coordinator_state.coordinator_task.task_id`. Do not copy or
+  pass the primary ID on behalf of another task. A repair, audit, reporting, or
+  prompt-design task with a different ID is read-only for live Coordinator
+  state and must not claim, prepare, send, complete, release, create/update a
+  Mission, render canonical status, or register/execute runtime recovery.
 
 Input control plane
 - Accept review replies, action replies, direction or vision changes, comments,
@@ -188,6 +247,32 @@ Portfolio scheduling pass
   an ordinary successor. Register its evidence-bound, allowlisted recovery
   action and drain its local-effect, restricted-probe, and receipt phases.
   Never leave an adopted action as prose-only `SYSTEM_BLOCKED` state.
+
+Mission value gate
+- Apply quick-win priority to discretionary new work, not to mandatory receipt
+  handling. First drain already-sent Worker/Supervisor results and their exact
+  protocol handoffs; then admit only the smallest new Mission that removes the
+  current project bottleneck or makes an existing artifact immediately usable.
+- Before `mission-init` or `mission-continue`, require `value_contract_v1` with
+  the project North Star, current bottleneck, user-visible value, smallest
+  deliverable, exact next consumer, reuse/integration path, adoption test, kill
+  condition, objective fit, work class, one-or-two Worker-turn ceiling, domain
+  shift flag, and explicit out-of-scope list.
+- Default `work_class` is `quick_win` and one Worker turn. A bounded two-turn
+  slice must explain `why_not_smaller`. A strategic bet, exploratory Mission,
+  or genre/domain shift is inadmissible without exact evidence of explicit
+  user authorization.
+- “Use a different topic/source to prove generalization” is not by itself a
+  value path. Name the existing product capability that will consume the
+  result, the decision it will unlock, and the rule for discarding the result
+  if transfer fails. Otherwise request a smaller corrected Work Order or
+  record `NO_WORK`; do not dispatch.
+- Legacy Missions remain readable and may drain mandatory results, but their
+  completion does not grandfather another uncontracted successor. Before an
+  uncontracted legacy Mission advances or dispatches, route
+  `resolve_mission_value_gate` to its exact Supervisor. Only an immutable,
+  replay-safe `value_contract_admitted` event may restore ordinary dispatch;
+  otherwise record `NO_WORK` or park the Mission.
 
 Waiting and turn budget
 - Observe every route with the transport recorded in the plan. Poll each
@@ -251,8 +336,15 @@ Durable portfolio index
 - Include every registered repository, even when it has no Mission. For each
   row show: project state, current Mission and attempt, why it is or is not
   running, route owner, last semantic evidence, exact next move, unblock or
-  reselection condition, user action required yes/no, and links to artifact,
-  Worker Report, and Supervisor verdict when they exist.
+  reselection condition, and links to artifact, Worker Report, and Supervisor
+  verdict when they exist. Also include a `roadmap` position: overall position,
+  current block, completed blocks, next blocks, next gate, and the project's
+  completion definition. Do not substitute a guessed percentage.
+- Set top-level `next_user_action` to one complete card or `null`. A complete
+  card contains the exact project, decision/action kind, purpose, why now,
+  entrypoint, all requirements, reply format, owner, post-reply behavior, and
+  non-escalation boundary. A `WAITING_USER` row without that card forbids the
+  status checkpoint; do not make the user search another task or state file.
 - Distinguish MISSION_COMPLETE_NEXT_UNSELECTED, PARKED_BY_POLICY, and
   PROJECT_COMPLETE. Never describe a project as complete merely because its
   current Mission ended.

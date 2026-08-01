@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "classification",
+    "primary_writer_task_id",
     "state_fingerprint",
     "scheduler_claim",
     "ready_actions",
@@ -29,6 +30,7 @@
   ],
   "properties": {
     "classification": {"const": "COORDINATOR_DETERMINISTIC_PLAN"},
+    "primary_writer_task_id": {"type": "string", "minLength": 1},
     "state_fingerprint": {"type": "string", "minLength": 64},
     "scheduler_claim": {"type": ["object", "null"]},
     "ready_actions": {

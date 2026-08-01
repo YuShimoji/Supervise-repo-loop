@@ -53,6 +53,30 @@ recipient, token, cursor, or route status makes the checkpoint invalid. Route
 admission and release are semantic changes even if repository artifacts do not
 change.
 
+## Single-writer boundary
+
+The active `coordinator_state.coordinator_task.task_id` is the sole writer for
+live Coordinator state. Every mutating CLI path must verify that the process
+`CODEX_THREAD_ID` equals that binding and must use the canonical installed
+`state/` paths for the Coordinator record, scheduler, Missions/events, and
+portfolio JSON/Markdown. Pointing a command at a cloned Coordinator record does
+not grant authority to mutate the canonical scheduler or any other live
+surface.
+
+Repair, audit, reporting, Prompt-design, and repository-development tasks are
+read-only for live state when their exact task ID differs. They must not claim,
+prepare, send, complete, release, register/execute runtime recovery, mutate a
+Mission/event, or render the canonical portfolio. Multiple route leases are
+work owned by one writer; they are not multiple writers.
+
+`CODEX_THREAD_ID` is a cooperative operational fence. It does not create a
+malicious-security boundary against a full-access process running as the same
+OS user. Such isolation would require an external credential or transaction
+service. An explicit primary-rebind administrator operation may change the
+binding only at a verified idle edge: no scheduler claim, prepared delivery,
+route lease, or recovery-owned runtime phase. It records the previous and new
+task IDs plus authority; normal repair and recovery never rebind.
+
 ## Incident evidence
 
 The pre-v3 Coordinator session telemetry contained 386 heartbeat turns. Summing
@@ -88,6 +112,7 @@ There is no independent status-only continuation test.
 The plan exposes:
 
 - semantic state fingerprint;
+- exact `primary_writer_task_id` from the active Coordinator binding;
 - one exact next action and stable action ID;
 - every ready action that remains eligible;
 - the short-lived scheduler claim;
@@ -177,11 +202,9 @@ repair disposition becomes an exact scheduler action rather than an unchanged
 BLOCKED probe. Its evidence-bound claim cannot complete without a durable
 effect receipt or be released after preparation.
 
-The normal deployment has one Coordinator writer. A second writer is not
-authorized. Multiple route leases represent independent recipient waits, not
-multiple state writers. Scheduler revision checks reject stale in-process
-plans; multiple writer support would require an external compare-and-swap
-journal.
+Scheduler revision checks reject stale in-process plans. They supplement the
+single-writer boundary above; multiple writer support would require an external
+compare-and-swap journal.
 
 ## Priority and isolation
 
@@ -190,7 +213,7 @@ Ready actions are independent from the user-card inbox. Current priority is:
 1. direction updates and project questions queued in the Coordinator;
 2. queued review or action responses;
 3. exact Supervisor or Worker result routes;
-4. ready Mission transitions;
+4. value-admitted ready Mission transitions;
 5. one individual user card;
 6. one changed BLOCKED recovery inspection per lane frontier;
 7. one authority reconciliation per changed repository fingerprint;
@@ -215,6 +238,37 @@ unrelated ready actions.
 The plan must expose an active route and a different repository's ready action
 at the same time. Counting the active action again as ready, or hiding a ready
 successor behind a waiting route, is invalid.
+
+## Mission admission and gate delta
+
+Mandatory inbound result handling and its required protocol handoff are not
+subject to discretionary prioritization; drain them first. Before a new or
+continued Mission can appear as ready, its value contract must bind the current
+repository authority source, revision, fingerprint, and `current_next_action`,
+identify the exact next consumer, and state a concrete `gate_delta`. The
+smallest deliverable must directly move that gate or make the current artifact
+immediately usable.
+
+The default is a one-Worker-turn quick win, bounded at two turns. A larger or
+non-quick slice must explain why no smaller deliverable creates usable value.
+Reuse or finish the existing artifact before producing another source, story,
+genre, form, benchmark, or candidate. If a new artifact is essential, the
+contract names why the current one cannot satisfy the gate and how the new one
+is consumed immediately.
+
+Any new artifact, source, story, form, or candidate—and every genre/domain
+shift, exploratory Mission, parallel product direction, or strategic bet—
+requires exact explicit user authorization evidence. Generic transfer learning
+or “different topic to prove generalization” is insufficient. Missing evidence
+yields `MISSION_VALUE_GATE`; the Supervisor must narrow the Work Order, return
+`NO_WORK`, or park the proposal. A completed frontier is successor eligibility
+only and never bypasses this admission gate.
+
+An existing legacy Mission without a valid contract is likewise ineligible for
+`advance_mission` or `dispatch_work_order`. The scheduler substitutes
+`resolve_mission_value_gate` to the exact Supervisor. A corrected contract may
+be attached exactly once with the replay-safe `value_contract_admitted` event;
+it cannot later be replaced. The alternative outcomes remain `NO_WORK` or park.
 
 ## Successor intent
 
@@ -283,6 +337,11 @@ prior event was routed. Unrelated project state is unchanged.
 
 The recovery automation is normally paused.
 
+It is attached only to and may wake only the exact bound primary Coordinator
+task. The lease has no writer identity of its own, cannot copy or substitute a
+task ID, cannot claim as a repair/automation task, and cannot perform a primary
+rebind. A binding or canonical-state-path mismatch yields a read-only no-op.
+
 For actions that send to a Supervisor or Worker:
 
 1. claim one exact action;
@@ -291,9 +350,9 @@ For actions that send to a Supervisor or Worker:
    receipt/cursor;
 4. move it to a repository-scoped route lease, release the scheduler claim,
    and repeat from step 1 for another repository while capacity remains;
-5. poll every exact ChatGPT Supervisor target once, then issue one multi-target
-   wait for at most 60 seconds containing only Codex Worker targets and their
-   current cursors;
+5. poll every exact ChatGPT Supervisor target once, then issue exactly one
+   multi-target wait for at most 60 seconds containing only Codex Worker targets
+   and their current cursors;
 6. consume and persist the first semantic result from either observer and
    complete only its lease;
 7. recompute the plan, drain any required protocol handoff to its next exact

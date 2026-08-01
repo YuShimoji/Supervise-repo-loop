@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "purpose": "Recreate Codex scheduling structure per host without copying live writer identity or runtime state.",
+  "profiles": [
+    {
+      "role": "coordinator_recovery_lease",
+      "kind": "heartbeat",
+      "prompt_source": "references/recovery-lease-prompt.md",
+      "initial_status": "PAUSED",
+      "activation_gate": "coordinator-plan.watchdog_should_be_armed=true",
+      "pause_gate": "coordinator-plan.watchdog_should_be_armed=false",
+      "portable_fields": [
+        "role",
+        "kind",
+        "prompt_source",
+        "activation_gate",
+        "pause_gate"
+      ],
+      "host_local_fields": [
+        "automation_id",
+        "target_thread_id",
+        "status",
+        "schedule",
+        "notification_policy"
+      ],
+      "forbidden_transfer": [
+        "installed_state",
+        "primary_writer_task_id",
+        "route_lease",
+        "delivery_token",
+        "automation_record"
+      ]
+    },
+    {
+      "role": "post_work_reflection",
+      "kind": "cron",
+      "safety_contract": "existing_exact_origin_and_matching_upstream_only",
+      "portable_fields": [
+        "role",
+        "kind",
+        "safety_contract"
+      ],
+      "host_local_fields": [
+        "automation_id",
+        "project_id",
+        "schedule",
+        "one_time_gate_path",
+        "discovery_helper_path",
+        "checkpoint_path",
+        "notification_policy"
+      ],
+      "repository_preconditions": [
+        "exact_origin",
+        "named_branch",
+        "matching_origin_upstream",
+        "owned_publishable_diff",
+        "green_project_gate",
+        "normal_push_exact_sha_readback"
+      ],
+      "forbidden_actions": [
+        "create_or_replace_remote",
+        "copy_live_state",
+        "copy_automation_checkpoint",
+        "history_rewrite",
+        "force_push",
+        "merge",
+        "release",
+        "infer_acceptance"
+      ]
+    }
+  ]
+}

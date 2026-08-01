@@ -47,6 +47,12 @@ new discretionary work, generic successor requests, review presentation, and
 portfolio promotion do not continue. After all registered repositories have
 verified records, the ledger reports `FRONTIER_VERIFIED`.
 
+Gate abstention is machine-readable: an explicit null frontier returns
+`NO_ACTIVE_CANDIDATE`, missing or unverified authority returns
+`AUTHORITY_CONFLICT`, other unresolved lineage returns
+`FRONTIER_RECONCILIATION_REQUIRED`, and a late external result returns
+`STALE_RESULT_QUARANTINED` while remaining auditable.
+
 ## Authority high-water signal
 
 `collect_authority_signals` records every registered repository even when no

@@ -280,7 +280,7 @@ class FrontierReconciliationRegressionTests(unittest.TestCase):
             expected_artifact={"artifact_id": "cue-002-partial"},
             authority_signal=authority_signal(tombstone),
         )
-        self.assertEqual(gate["classification"], "FRONTIER_RECONCILIATION_REQUIRED")
+        self.assertEqual(gate["classification"], "NO_ACTIVE_CANDIDATE")
         self.assertIn("no_candidate", gate["reasons"])
 
     def test_FR_FFF_01_delivered_densou_request_waits_for_d0_result_application(self) -> None:
@@ -338,7 +338,7 @@ class FrontierReconciliationRegressionTests(unittest.TestCase):
             observed_authority_signal=payload["authority_signal"],
             actor_task_id=OWNER,
         )
-        self.assertEqual(result["classification"], "STALE_EXTERNAL_RESULT_QUARANTINED")
+        self.assertEqual(result["classification"], "STALE_RESULT_QUARANTINED")
         self.assertEqual(current_frontier(frontier)["artifact_id"], "artifact-2")
         self.assertEqual(frontier["quarantined_results"][0]["result_id"], "stale-result")
         self.assertEqual(scheduler["route_leases"], [])
@@ -473,6 +473,27 @@ class FrontierReconciliationRegressionTests(unittest.TestCase):
         self.assertTrue(signal["git"]["dirty"])
         self.assertTrue(signal["high_water_marks"][0]["is_dirty"])
         self.assertRegex(signal["high_water_marks"][0]["last_commit_sha"], r"^[0-9a-f]{40}$")
+
+        authority_frontier = loop.default_frontier_state([REPO_A])
+        live_event = frontier_event(
+            epoch=1,
+            based_on=0,
+            artifact_id="authority-current",
+            actor="supervisor",
+            token="authority-current",
+            branch=signal["git"]["branch"],
+            head_sha=signal["git"]["head_sha"],
+        )
+        loop.apply_frontier_event(authority_frontier, live_event)
+        conflict = loop.frontier_gate_decision(
+            authority_frontier,
+            REPO_A,
+            LANE,
+            action_kind="advance_mission",
+            expected_artifact={"artifact_id": live_event["artifact_id"]},
+            authority_signal=None,
+        )
+        self.assertEqual(conflict["classification"], "AUTHORITY_CONFLICT")
 
         scheduler = scheduler_with_waiting_route()
         frontier = loop.default_frontier_state([REPO_A])

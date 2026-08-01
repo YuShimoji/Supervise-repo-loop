@@ -997,8 +997,15 @@ def frontier_gate_decision(
             reasons.append("historical")
         elif not reasons:
             reasons.append(str(exc))
+        classification = "FRONTIER_RECONCILIATION_REQUIRED"
+        if "no_candidate" in reasons:
+            classification = "NO_ACTIVE_CANDIDATE"
+        elif "authority_unverified" in reasons or any(
+            "authority" in reason.lower() for reason in reasons
+        ):
+            classification = "AUTHORITY_CONFLICT"
         return {
-            "classification": "FRONTIER_RECONCILIATION_REQUIRED",
+            "classification": classification,
             "reasons": reasons,
             "certificate": None,
         }
@@ -8849,7 +8856,7 @@ def apply_external_result_transaction(
         portfolio.clear()
         portfolio.update(portfolio_work)
         return {
-            "classification": "STALE_EXTERNAL_RESULT_QUARANTINED",
+            "classification": "STALE_RESULT_QUARANTINED",
             "action_id": action_id,
             "result_id": result_id,
             "expected_frontier_epoch": current_epoch,
@@ -8924,7 +8931,7 @@ def apply_external_result_transaction(
         portfolio.clear()
         portfolio.update(portfolio_work)
         return {
-            "classification": "STALE_EXTERNAL_RESULT_QUARANTINED",
+            "classification": "STALE_RESULT_QUARANTINED",
             "action_id": action_id,
             "result_id": result_id,
             "deduplicated": False,

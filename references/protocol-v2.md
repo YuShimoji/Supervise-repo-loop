@@ -11,6 +11,9 @@ Mission packets contain only deltas.
 - Persistent Codex Worker performs repository work and never self-adjudicates.
 - User writes only in the Coordinator and receives only Supervisor-confirmed
   terminal decisions and actions there.
+- Every ordinary Supervisor or Worker route carries a current
+  `SupervisorContextEnvelope`; no endpoint reconstructs the project north star
+  or current position from chat recency.
 - The active `coordinator_state.coordinator_task.task_id` is the sole live-state
   writer. Repair, audit, reporting, and development tasks are read-only unless
   they are that exact bound task.
@@ -142,7 +145,9 @@ Mission packets contain only deltas.
 - Apply a semantic result only with the frontier write-ahead reducer. It binds
   exact route/result identity, current independent authority observation,
   `based_on_frontier_epoch`, append-only Mission replacement, action closure,
-  and portfolio v3. A stale epoch or lower-authority replay is auditable but
+  and portfolio v4. For a context-bound action, also require the exact envelope
+  ID and `based_on_project_context_revision`. A stale context revision, changed
+  active lane, stale epoch, or lower-authority replay is auditable but
   cannot create work or user-facing current state.
 - Poll each exact ChatGPT Supervisor route once, then wait once for at most 60
   seconds on the Codex Worker route set and consume the first semantic result.
@@ -215,7 +220,7 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
 
 ## Progress presentation
 
-- Canonical status JSON uses schema version 3 and is rendered, not separately
+- Canonical status JSON uses schema version 4 and is rendered, not separately
   rewritten, into the Markdown index.
 - It records the exact scheduler and frontier revisions, safety mode,
   FrontierCertificates, and structured active route set used to build the

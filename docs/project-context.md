@@ -8,10 +8,9 @@ bindings or allowing one project's human gate to stall unrelated work.
 
 ## Current development axis
 
-Replace the global single-route claim with a portfolio scheduler that separates
-a short-lived scheduling claim from independent repository route leases, while
-retaining deterministic delivery, project-isolated review, durable status, and
-traceable user input.
+Keep the portfolio scheduler deterministic while adding a generic project-wide
+context frontier above each lane's artifact frontier. No Supervisor or Worker
+may act from a stale roadmap, narrowed lane view, or older evidence set.
 
 ## Current slice
 
@@ -63,6 +62,17 @@ not inferred or rewritten by this repair lane; it remains
 `legacy_unverified` until the exact primary Coordinator performs a later
 authorized reconciliation.
 
+The following project-context correction closes the remaining scope gap. One
+append-only `ProjectContextRecord` now binds north star, roadmap position,
+bottleneck, completion definition, every active lane frontier, decisions, and
+evidence coverage. Every ordinary external action carries a deterministic
+`SupervisorContextEnvelope`; results are accepted only if both the project
+context revision and lane frontier epoch still match. Portfolio schema v4
+projects that same record, so a safe action plan and the user-visible current
+position cannot silently diverge. The runtime contains no product-name branch;
+four existing migration shapes and new web/game/media registrations use the
+same contract.
+
 ## Final deliverable image
 
 The Coordinator always shows one actionable user card, continues safe READY
@@ -81,14 +91,22 @@ completed while A remains delayed. The canonical portfolio index, full
 Supervisor disposition history, and interrupted multi-route recovery also
 require behavior-level verification, not Prompt phrase checks.
 
+For the context-frontier slice, source acceptance requires the seven-project
+generic canary, stale cross-lane/result quarantine, v4 portfolio consistency,
+full regression, and source/installed static parity. Live registered projects
+remain reconciliation-only until the exact primary Coordinator applies current
+context events; this repair task does not infer or initialize them.
+
 ## Acceptance state
 
-- 2026-08-02 frontier repair source checkpoint: implementation and synthetic
-  regression coverage are present on the isolated repair branch. Required
-  live product repositories and installed live `state/` were not mutated.
-  Static review, complete source tests, commit/push, and a later primary-owned
-  live migration remain distinct gates; no current product artifact is claimed
-  from the former schema-v2 portfolio.
+- 2026-08-02 project-context frontier installed checkpoint: the generic
+  seven-project canary covers four existing-project migration shapes plus new
+  web, game, and media registrations through one contract. All 179 source and
+  installed regression tests passed, and the 59-file static allowlist passed
+  SHA-256 readback. Live `state/` and product repositories were not copied or
+  mutated. The four live projects remain explicitly reconciliation-only until
+  the exact primary Coordinator records current frontier and context events;
+  no current product artifact is inferred from the former portfolio.
 - 2026-08-02 cross-host static checkpoint: the 47-file allowlist passed SHA-256
   source/installed parity and all 151 tests passed in both copies. The
   portability contract keeps the recovery heartbeat prompt portable but makes

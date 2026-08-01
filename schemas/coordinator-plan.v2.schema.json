@@ -10,6 +10,9 @@
     "frontier_revision",
     "frontier_safety_mode",
     "frontier_gate",
+    "project_context_revision",
+    "project_context_safety_mode",
+    "project_context_gate",
     "scheduler_claim",
     "ready_actions",
     "required_handoff_actions",
@@ -41,6 +44,12 @@
       "enum": ["TRANSPORT_ONLY_RECONCILIATION", "FRONTIER_VERIFIED", null]
     },
     "frontier_gate": {"type": "array", "items": {"type": "object"}},
+    "project_context_revision": {"type": ["integer", "null"], "minimum": 0},
+    "project_context_safety_mode": {
+      "type": ["string", "null"],
+      "enum": ["CONTEXT_RECONCILIATION_REQUIRED", "PROJECT_CONTEXT_VERIFIED", null]
+    },
+    "project_context_gate": {"type": "array", "items": {"type": "object"}},
     "scheduler_claim": {"type": ["object", "null"]},
     "ready_actions": {
       "type": "array",

@@ -18,7 +18,9 @@ starting, resuming, or changing the one user-facing Coordinator task. Read
 the durable all-project status or user-input lineage. Read
 [frontier-reconciliation.md](docs/frontier-reconciliation.md) before selecting
 ordinary work, applying an external result, presenting review, or promoting a
-portfolio row. Use
+portfolio row. Read
+[project-context-frontier.md](docs/project-context-frontier.md) before any
+ordinary Supervisor or Worker send and before applying its result. Use
 [recovery-lease-prompt.md](references/recovery-lease-prompt.md) as the exact
 attached heartbeat contract. Read
 [authorized-runtime-recovery.md](docs/authorized-runtime-recovery.md) before
@@ -37,7 +39,7 @@ identity is `coordinator_state.coordinator_task.task_id`; every mutating CLI
 invocation must run in that same task, require the process `CODEX_THREAD_ID` to
 match it, and use the canonical paths under the installed skill's `state/` for
 the Coordinator record, scheduler, frontier ledger/journal, Missions/events,
-and portfolio projections.
+project-context ledger, and portfolio projections.
 A caller-selected state clone is a test fixture, never an alternate live state
 authority.
 
@@ -97,9 +99,11 @@ reply format, post-reply behavior, and non-escalation boundary. A
 route-set change is semantic. Before checkpointing, require the portfolio's
 scheduler revision, concurrency, active-route count, and exact structured route
 set to match the scheduler state used for the response; a stale projection is a
-checkpoint blocker, not a presentable status. Also require portfolio schema v3,
+checkpoint blocker, not a presentable status. Also require portfolio schema v4,
 the exact frontier revision/safety mode, and a current FrontierCertificate for
-every row promoted beyond reconciliation. A
+every row promoted beyond reconciliation. Also require the exact project-context
+revision/safety mode and one current `SupervisorContextEnvelope` on every
+ordinary Supervisor/Worker action. A
 status request consumes already-arrived route results unless the user explicitly
 requests a non-continuing read-only snapshot. `READY` with free capacity must be claimed. If a real turn or safety
 ceiling leaves it unclaimed, persist its owner, action ID, deadline, and wake
@@ -287,7 +291,7 @@ paused recovery lease:
 7. consume the first semantic result with
    `coordinator-action-apply-result`; delivery ACK alone is never completion.
    The idempotent reducer validates exact identity and authority observation,
-   applies frontier CAS, Mission, scheduler, and portfolio v3 together, closes
+   applies project-context/frontier CAS, Mission, scheduler, and portfolio v4 together, closes
    only that route, and then recomputes the plan; drain the mandatory protocol
    handoff to its next external wait or terminal before checkpoint;
 8. on an unchanged timeout, persist the wait set and checkpoint without another

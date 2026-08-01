@@ -278,6 +278,64 @@ def certified_frontier_fixture(
     return state
 
 
+def certified_project_context_fixture(
+    registry: dict, signals: list[dict], frontier: dict
+) -> dict:
+    state = loop.default_project_context_state(
+        item["repository_id"] for item in registry["repositories"]
+    )
+    by_repository = {item["repository_id"]: item for item in signals}
+    for repository in registry["repositories"]:
+        repository_id = repository["repository_id"]
+        lane = repository["default_supervision_lane"]
+        token = repository_id.rsplit("/", 1)[-1]
+        frontier_record = frontier["records"][f"{repository_id}|{lane}"]
+        signal = by_repository[repository_id]
+        loop.apply_project_context_event(
+            state,
+            {
+                "repository_id": repository_id,
+                "project_context_revision": 1,
+                "project_context_event_id": f"context-{token}",
+                "based_on_project_context_revision": 0,
+                "source_actor": "supervisor",
+                "source_message_id": f"context-message-{token}",
+                "authority_revision": signal["git"]["head_sha"],
+                "authority_fingerprint": signal["authority_fingerprint"],
+                "north_star": f"Deliver the current value for {repository_id}.",
+                "current_bottleneck": "The current Mission is not complete.",
+                "completion_definition": "The current gate has exact evidence.",
+                "roadmap": {
+                    "overall_position": "active delivery",
+                    "current_block": "current Mission",
+                    "next_gate": "exact Supervisor verdict",
+                    "completion_definition": "The current gate has exact evidence.",
+                    "completed_blocks": ["authority identified"],
+                    "next_blocks": ["complete current Mission"],
+                },
+                "active_lanes": [lane],
+                "lane_frontier_event_ids": {
+                    lane: frontier_record["frontier_event_id"]
+                },
+                "cross_lane_conflicts": [],
+                "decisions_since_prior": [],
+                "evidence_manifest": [
+                    {
+                        "evidence_id": f"authority-{token}",
+                        "kind": "authority_observation",
+                        "locator": signal["root"],
+                        "authority_role": "current_authority",
+                        "sha256": signal["authority_fingerprint"],
+                    }
+                ],
+                "omitted_evidence": [],
+                "supersedes_context_event_ids": [],
+                "recorded_at": "2026-08-02T00:00:00Z",
+            },
+        )
+    return state
+
+
 def bind_mission_to_frontier(mission_value: dict, signal: dict) -> dict:
     bound = copy.deepcopy(mission_value)
     token = bound["repository_id"].rsplit("/", 1)[-1]
@@ -1419,6 +1477,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 "coordinator": root / "coordinator.json",
                 "scheduler": root / "scheduler.json",
                 "frontier": root / "frontier.json",
+                "project_context": root / "project-context.json",
                 "missions": root / "missions",
             }
             paths["missions"].mkdir()
@@ -1434,8 +1493,11 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             signal_by_repository = {
                 item["repository_id"]: item for item in signals
             }
+            frontier = certified_frontier_fixture(registry, signals)
+            loop.atomic_write_json(paths["frontier"], frontier)
             loop.atomic_write_json(
-                paths["frontier"], certified_frontier_fixture(registry, signals)
+                paths["project_context"],
+                certified_project_context_fixture(registry, signals, frontier),
             )
             loop.atomic_write_json(
                 paths["missions"] / "dispatch.json",
@@ -1459,6 +1521,8 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                 str(paths["missions"]),
                 "--frontier-state",
                 str(paths["frontier"]),
+                "--project-context-state",
+                str(paths["project_context"]),
             ]
 
             plan_out = io.StringIO()
@@ -1878,7 +1942,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             "the Coordinator prompt must have one unambiguous JSON contract",
         )
         contract = json.loads(encoded_contracts[0])
-        self.assertEqual(contract["contract_version"], 8)
+        self.assertEqual(contract["contract_version"], 9)
 
         self.assertEqual(
             contract["scheduler"],
@@ -1925,7 +1989,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             contract["status"]["update_policy"], "semantic_change_only"
         )
-        self.assertEqual(contract["status"]["schema_version"], 3)
+        self.assertEqual(contract["status"]["schema_version"], 4)
         self.assertEqual(
             contract["frontier"]["external_result_application"],
             "coordinator-action-apply-result",
@@ -1950,7 +2014,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             contract["status"]["checkpoint_consistency"],
             {
-                "source": "same_scheduler_and_frontier_revisions_and_active_route_set",
+                "source": "same_scheduler_frontier_and_project_context_revisions_and_active_route_set",
                 "projection_order": "json_then_render_then_verify",
                 "on_mismatch": "CHECKPOINT_FORBIDDEN",
             },
@@ -2017,6 +2081,9 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                     "frontier_revision",
                     "frontier_safety_mode",
                     "frontier_gate",
+                    "project_context_revision",
+                    "project_context_safety_mode",
+                    "project_context_gate",
                     "active_routes",
                     "ready_actions",
                     "required_handoff_actions",

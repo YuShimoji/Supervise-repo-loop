@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/supervisor-context-envelope.v1",
+  "title": "Supervisor project-context and artifact-frontier envelope v1",
+  "type": "object",
+  "required": [
+    "schema_version", "repository_id", "lane_id", "action_kind",
+    "project_context_revision", "project_context_event_id",
+    "repository_frontier_fingerprint", "frontier_certificate",
+    "authority_revision", "authority_fingerprint", "north_star",
+    "current_bottleneck", "completion_definition", "roadmap", "active_lanes",
+    "lane_frontiers", "cross_lane_conflicts", "decisions_since_prior",
+    "evidence_manifest", "omitted_evidence", "retired_artifacts", "envelope_id"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "repository_id": {"type": "string", "minLength": 1},
+    "lane_id": {"type": "string", "minLength": 1},
+    "action_kind": {"type": "string", "minLength": 1},
+    "project_context_revision": {"type": "integer", "minimum": 1},
+    "project_context_event_id": {"type": "string", "minLength": 1},
+    "repository_frontier_fingerprint": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "frontier_certificate": {"type": "object"},
+    "authority_revision": {"type": "string", "minLength": 1},
+    "authority_fingerprint": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "north_star": {"type": "string", "minLength": 1},
+    "current_bottleneck": {"type": "string", "minLength": 1},
+    "completion_definition": {"type": "string", "minLength": 1},
+    "roadmap": {"type": "object"},
+    "active_lanes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "lane_frontiers": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "cross_lane_conflicts": {"type": "array", "maxItems": 0},
+    "decisions_since_prior": {"type": "array"},
+    "evidence_manifest": {"type": "array", "minItems": 1},
+    "omitted_evidence": {"type": "array"},
+    "retired_artifacts": {"type": "array"},
+    "envelope_id": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+  },
+  "additionalProperties": false
+}

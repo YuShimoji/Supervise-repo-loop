@@ -40,6 +40,7 @@ DEFAULT_PORTFOLIO_JSON = SKILL_ROOT / "state" / "coordinator-current-status.v1.j
 DEFAULT_PORTFOLIO_MARKDOWN = SKILL_ROOT / "state" / "coordinator-current-status.md"
 DEFAULT_FRONTIER_STATE = SKILL_ROOT / "state" / "frontier-ledger.v1.json"
 DEFAULT_FRONTIER_JOURNAL = SKILL_ROOT / "state" / "frontier-transactions"
+DEFAULT_PROJECT_CONTEXT_STATE = SKILL_ROOT / "state" / "project-context-ledger.v1.json"
 PROTOCOL_PATH = SKILL_ROOT / "references" / "protocol-v2.md"
 
 COORDINATOR_PROMPT_THIS_REPOSITORY = (
@@ -59,7 +60,10 @@ MISSION_OBJECTIVE_FITS = {"direct", "enabling", "exploratory"}
 PRIMARY_WRITER_REBIND_CONFIRMATION = "REBIND_PRIMARY_COORDINATOR_WRITER"
 FRONTIER_STATE_VERSION = 1
 FRONTIER_PORTFOLIO_VERSION = 3
+PROJECT_CONTEXT_PORTFOLIO_VERSION = 4
 FRONTIER_SAFETY_MODE = "TRANSPORT_ONLY_RECONCILIATION"
+PROJECT_CONTEXT_STATE_VERSION = 1
+PROJECT_CONTEXT_SAFETY_MODE = "CONTEXT_RECONCILIATION_REQUIRED"
 FRONTIER_DISPOSITIONS = {
     "active",
     "accepted",
@@ -105,6 +109,29 @@ FRONTIER_TRANSPORT_ACTION_KINDS = {
 FRONTIER_RECONCILIATION_ACTION_KINDS = {
     "reconcile_repository_frontier",
     "reconcile_repository_authority",
+}
+PROJECT_CONTEXT_RECONCILIATION_ACTION_KINDS = {
+    "reconcile_project_context",
+    "reconcile_repository_frontier",
+    "reconcile_repository_authority",
+    "route_direction_update",
+    "route_project_question",
+    "route_user_response",
+}
+PROJECT_CONTEXT_BOUND_ACTION_KINDS = {
+    "advance_mission",
+    "dispatch_work_order",
+    "inspect_blocked_recovery",
+    "present_user_card",
+    "repair_blocker_contract",
+    "request_next_mission",
+    "probe_authorized_runtime_repair",
+    "resolve_mission_value_gate",
+    "return_authorized_runtime_recovery_result",
+    "return_worker_result",
+    "await_supervisor_verdict",
+    "await_supervisor_work_order",
+    "await_worker_result",
 }
 
 MODES = {"coordinator", "worker", "single-thread", "binding-repair"}
@@ -481,6 +508,15 @@ def migrate_frontier_state(
             migrated["repository_status"].setdefault(
                 normalized, "legacy_unverified"
             )
+    migrated["safety_mode"] = (
+        "FRONTIER_VERIFIED"
+        if migrated["repository_status"]
+        and all(
+            status == "verified"
+            for status in migrated["repository_status"].values()
+        )
+        else FRONTIER_SAFETY_MODE
+    )
     validate_frontier_state(migrated)
     return migrated
 
@@ -492,6 +528,720 @@ def load_frontier_state(
     target = Path(path)
     raw = load_json(target) if target.is_file() else None
     return migrate_frontier_state(raw, repository_ids)
+
+
+def default_project_context_state(
+    repository_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    repositories = sorted(
+        {str(item).strip() for item in repository_ids if str(item).strip()}
+    )
+    return {
+        "schema_version": PROJECT_CONTEXT_STATE_VERSION,
+        "revision": 0,
+        "safety_mode": PROJECT_CONTEXT_SAFETY_MODE,
+        "contexts": {},
+        "events": [],
+        "repository_status": {
+            repository_id: "legacy_unverified" for repository_id in repositories
+        },
+    }
+
+
+def migrate_project_context_state(
+    state: dict[str, Any] | None,
+    repository_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    if state is None:
+        return default_project_context_state(repository_ids)
+    if not isinstance(state, dict):
+        raise ProtocolError("project context state must be an object")
+    if state.get("schema_version") != PROJECT_CONTEXT_STATE_VERSION:
+        raise ProtocolError("unsupported project context state schema")
+    migrated = copy.deepcopy(state)
+    migrated.setdefault("revision", 0)
+    migrated.setdefault("safety_mode", PROJECT_CONTEXT_SAFETY_MODE)
+    migrated.setdefault("contexts", {})
+    migrated.setdefault("events", [])
+    migrated.setdefault("repository_status", {})
+    for repository_id in repository_ids:
+        normalized = str(repository_id or "").strip()
+        if normalized:
+            migrated["repository_status"].setdefault(
+                normalized, "legacy_unverified"
+            )
+    migrated["safety_mode"] = (
+        "PROJECT_CONTEXT_VERIFIED"
+        if migrated["repository_status"]
+        and all(
+            status == "verified"
+            for status in migrated["repository_status"].values()
+        )
+        else PROJECT_CONTEXT_SAFETY_MODE
+    )
+    validate_project_context_state(migrated)
+    return migrated
+
+
+def load_project_context_state(
+    path: Path | str,
+    repository_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    target = Path(path)
+    raw = load_json(target) if target.is_file() else None
+    return migrate_project_context_state(raw, repository_ids)
+
+
+def _validate_project_context_roadmap(roadmap: Any) -> None:
+    if not isinstance(roadmap, dict):
+        raise ProtocolError("project context roadmap must be an object")
+    for field in (
+        "overall_position",
+        "current_block",
+        "next_gate",
+        "completion_definition",
+    ):
+        if not isinstance(roadmap.get(field), str) or not roadmap[field].strip():
+            raise ProtocolError(f"project context roadmap requires {field}")
+    for field in ("completed_blocks", "next_blocks"):
+        values = roadmap.get(field)
+        if not isinstance(values, list) or any(
+            not isinstance(item, str) or not item.strip() for item in values
+        ):
+            raise ProtocolError(f"project context roadmap {field} is invalid")
+
+
+def validate_project_context_record(record: Any) -> None:
+    if not isinstance(record, dict):
+        raise ProtocolError("ProjectContextRecord must be an object")
+    required = (
+        "repository_id",
+        "project_context_revision",
+        "project_context_event_id",
+        "based_on_project_context_revision",
+        "source_actor",
+        "source_message_id",
+        "authority_revision",
+        "authority_fingerprint",
+        "north_star",
+        "current_bottleneck",
+        "completion_definition",
+        "roadmap",
+        "active_lanes",
+        "lane_frontier_event_ids",
+        "cross_lane_conflicts",
+        "decisions_since_prior",
+        "evidence_manifest",
+        "omitted_evidence",
+        "supersedes_context_event_ids",
+        "recorded_at",
+    )
+    missing = [field for field in required if field not in record]
+    if missing:
+        raise ProtocolError("ProjectContextRecord missing: " + ", ".join(missing))
+    for field in (
+        "repository_id",
+        "project_context_event_id",
+        "source_message_id",
+        "authority_revision",
+        "north_star",
+        "current_bottleneck",
+        "completion_definition",
+        "recorded_at",
+    ):
+        if not isinstance(record.get(field), str) or not record[field].strip():
+            raise ProtocolError(f"ProjectContextRecord requires {field}")
+    revision = record.get("project_context_revision")
+    based_on = record.get("based_on_project_context_revision")
+    if not isinstance(revision, int) or revision < 1:
+        raise ProtocolError("project context revision must be positive")
+    if not isinstance(based_on, int) or revision != based_on + 1:
+        raise ProtocolError("project context revision must advance by one")
+    if record.get("source_actor") not in FRONTIER_SOURCE_ACTORS:
+        raise ProtocolError("project context source_actor is invalid")
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{64}", str(record.get("authority_fingerprint") or "")
+    ):
+        raise ProtocolError("project context authority_fingerprint is invalid")
+    _validate_project_context_roadmap(record.get("roadmap"))
+    if record["roadmap"].get("completion_definition") != record.get(
+        "completion_definition"
+    ):
+        raise ProtocolError(
+            "project context completion definition must match its roadmap"
+        )
+    active_lanes = record.get("active_lanes")
+    if (
+        not isinstance(active_lanes, list)
+        or not active_lanes
+        or any(not isinstance(item, str) or not item.strip() for item in active_lanes)
+        or len(active_lanes) != len(set(active_lanes))
+    ):
+        raise ProtocolError("project context active_lanes must be unique and non-empty")
+    lane_events = record.get("lane_frontier_event_ids")
+    if not isinstance(lane_events, dict) or set(lane_events) != set(active_lanes):
+        raise ProtocolError(
+            "project context lane frontier map must match every active lane"
+        )
+    if any(not isinstance(value, str) or not value.strip() for value in lane_events.values()):
+        raise ProtocolError("project context lane frontier event IDs are invalid")
+    conflicts = record.get("cross_lane_conflicts")
+    if not isinstance(conflicts, list) or any(
+        not isinstance(item, str) or not item.strip() for item in conflicts
+    ):
+        raise ProtocolError("project context cross_lane_conflicts is invalid")
+    decisions = record.get("decisions_since_prior")
+    if not isinstance(decisions, list):
+        raise ProtocolError("project context decisions_since_prior must be an array")
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            raise ProtocolError("project context decision must be an object")
+        for field in ("event_id", "lane_id", "disposition", "source_actor"):
+            if not isinstance(decision.get(field), str) or not decision[field].strip():
+                raise ProtocolError(f"project context decision requires {field}")
+        if decision["disposition"] not in FRONTIER_DISPOSITIONS:
+            raise ProtocolError("project context decision disposition is invalid")
+        if decision["source_actor"] not in FRONTIER_SOURCE_ACTORS:
+            raise ProtocolError("project context decision source_actor is invalid")
+    evidence = record.get("evidence_manifest")
+    if not isinstance(evidence, list) or not evidence:
+        raise ProtocolError("project context evidence_manifest must be non-empty")
+    evidence_ids: set[str] = set()
+    for item in evidence:
+        if not isinstance(item, dict):
+            raise ProtocolError("project context evidence entry must be an object")
+        for field in ("evidence_id", "kind", "locator", "authority_role"):
+            if not isinstance(item.get(field), str) or not item[field].strip():
+                raise ProtocolError(f"project context evidence requires {field}")
+        if item["evidence_id"] in evidence_ids:
+            raise ProtocolError("project context evidence IDs must be unique")
+        evidence_ids.add(item["evidence_id"])
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", str(item.get("sha256") or "")):
+            raise ProtocolError("project context evidence sha256 is invalid")
+    omitted = record.get("omitted_evidence")
+    if not isinstance(omitted, list):
+        raise ProtocolError("project context omitted_evidence must be an array")
+    omitted_ids: set[str] = set()
+    for item in omitted:
+        if not isinstance(item, dict) or any(
+            not isinstance(item.get(field), str) or not item[field].strip()
+            for field in ("evidence_id", "reason")
+        ):
+            raise ProtocolError("project context omitted evidence is invalid")
+        if item["evidence_id"] in omitted_ids:
+            raise ProtocolError(
+                "project context omitted evidence IDs must be unique"
+            )
+        if item["evidence_id"] in evidence_ids:
+            raise ProtocolError(
+                "project context evidence cannot be included and omitted"
+            )
+        omitted_ids.add(item["evidence_id"])
+    supersedes = record.get("supersedes_context_event_ids")
+    if not isinstance(supersedes, list) or any(
+        not isinstance(item, str) or not item.strip() for item in supersedes
+    ):
+        raise ProtocolError("project context supersedes list is invalid")
+    if len(supersedes) != len(set(supersedes)):
+        raise ProtocolError("project context supersedes IDs must be unique")
+    if record["project_context_event_id"] in supersedes:
+        raise ProtocolError("project context event cannot supersede itself")
+
+
+def validate_project_context_state(state: Any) -> None:
+    if not isinstance(state, dict):
+        raise ProtocolError("project context state must be an object")
+    if state.get("schema_version") != PROJECT_CONTEXT_STATE_VERSION:
+        raise ProtocolError("unsupported project context state schema")
+    if not isinstance(state.get("revision"), int) or state["revision"] < 0:
+        raise ProtocolError("project context state revision is invalid")
+    if state.get("safety_mode") not in {
+        PROJECT_CONTEXT_SAFETY_MODE,
+        "PROJECT_CONTEXT_VERIFIED",
+    }:
+        raise ProtocolError("project context safety_mode is invalid")
+    if not isinstance(state.get("contexts"), dict):
+        raise ProtocolError("project contexts must be an object")
+    if not isinstance(state.get("events"), list):
+        raise ProtocolError("project context events must be an array")
+    if not isinstance(state.get("repository_status"), dict):
+        raise ProtocolError("project context repository_status must be an object")
+    for repository_id, record in state["contexts"].items():
+        validate_project_context_record(record)
+        if record.get("repository_id") != repository_id:
+            raise ProtocolError("project context repository key mismatch")
+    event_by_id: dict[str, dict[str, Any]] = {}
+    for event in state["events"]:
+        validate_project_context_record(event)
+        event_id = str(event["project_context_event_id"])
+        if event_id in event_by_id:
+            raise ProtocolError("project context event IDs must be unique")
+        event_by_id[event_id] = event
+    for status in state["repository_status"].values():
+        if status not in {
+            "legacy_unverified",
+            "reconciliation_required",
+            "authority_conflict",
+            "verified",
+        }:
+            raise ProtocolError("project context repository status is invalid")
+    for repository_id, record in state["contexts"].items():
+        if event_by_id.get(str(record["project_context_event_id"])) != record:
+            raise ProtocolError(
+                "current project context must match an append-only event"
+            )
+        status = state["repository_status"].get(repository_id)
+        allowed_statuses = (
+            {"verified", "authority_conflict"}
+            if not record.get("cross_lane_conflicts")
+            else {"reconciliation_required"}
+        )
+        if status not in allowed_statuses:
+            raise ProtocolError("project context repository status is stale")
+    for repository_id, status in state["repository_status"].items():
+        if status in {"verified", "authority_conflict"} and repository_id not in state[
+            "contexts"
+        ]:
+            raise ProtocolError(
+                "project context repository status requires a current record"
+            )
+    expected_safety_mode = (
+        "PROJECT_CONTEXT_VERIFIED"
+        if state["repository_status"]
+        and all(
+            status == "verified"
+            for status in state["repository_status"].values()
+        )
+        else PROJECT_CONTEXT_SAFETY_MODE
+    )
+    if state["safety_mode"] != expected_safety_mode:
+        raise ProtocolError("project context safety mode is stale")
+
+
+def apply_project_context_event(
+    state: dict[str, Any], candidate: dict[str, Any]
+) -> dict[str, Any]:
+    validate_project_context_state(state)
+    validate_project_context_record(candidate)
+    event_id = str(candidate["project_context_event_id"])
+    existing = next(
+        (
+            item
+            for item in state["events"]
+            if item.get("project_context_event_id") == event_id
+        ),
+        None,
+    )
+    if existing is not None:
+        if existing != candidate:
+            raise ProtocolError("conflicting project context event replay")
+        return {
+            "classification": "PROJECT_CONTEXT_EVENT_ALREADY_APPLIED",
+            "project_context_event_id": event_id,
+            "deduplicated": True,
+        }
+    repository_id = str(candidate["repository_id"])
+    current = state["contexts"].get(repository_id)
+    current_revision = (
+        int(current.get("project_context_revision", 0))
+        if isinstance(current, dict)
+        else 0
+    )
+    if candidate["based_on_project_context_revision"] != current_revision:
+        return {
+            "classification": "PROJECT_CONTEXT_EVENT_STALE",
+            "expected_project_context_revision": current_revision,
+            "based_on_project_context_revision": candidate[
+                "based_on_project_context_revision"
+            ],
+            "deduplicated": False,
+        }
+    if isinstance(current, dict):
+        current_precedence = FRONTIER_SOURCE_PRECEDENCE[current["source_actor"]]
+        candidate_precedence = FRONTIER_SOURCE_PRECEDENCE[candidate["source_actor"]]
+        if candidate_precedence < current_precedence:
+            return {
+                "classification": "PROJECT_CONTEXT_PRECEDENCE_REJECTED",
+                "current_source_actor": current["source_actor"],
+                "candidate_source_actor": candidate["source_actor"],
+                "deduplicated": False,
+            }
+        if current["project_context_event_id"] not in candidate.get(
+            "supersedes_context_event_ids", []
+        ):
+            return {
+                "classification": "PROJECT_CONTEXT_SUPERSESSION_REQUIRED",
+                "current_project_context_event_id": current[
+                    "project_context_event_id"
+                ],
+                "deduplicated": False,
+            }
+    next_state = copy.deepcopy(state)
+    next_state["events"].append(copy.deepcopy(candidate))
+    next_state["contexts"][repository_id] = copy.deepcopy(candidate)
+    next_state["repository_status"][repository_id] = (
+        "verified"
+        if not candidate.get("cross_lane_conflicts")
+        else "reconciliation_required"
+    )
+    next_state["revision"] = int(next_state["revision"]) + 1
+    next_state["safety_mode"] = (
+        "PROJECT_CONTEXT_VERIFIED"
+        if next_state["repository_status"]
+        and all(
+            status == "verified"
+            for status in next_state["repository_status"].values()
+        )
+        else PROJECT_CONTEXT_SAFETY_MODE
+    )
+    validate_project_context_state(next_state)
+    state.clear()
+    state.update(next_state)
+    return {
+        "classification": "PROJECT_CONTEXT_EVENT_APPLIED",
+        "project_context_event_id": event_id,
+        "project_context_revision": candidate["project_context_revision"],
+        "deduplicated": False,
+    }
+
+
+def _repository_frontier_fingerprint(
+    frontier_state: dict[str, Any], repository_id: str
+) -> str:
+    records = sorted(
+        (
+            copy.deepcopy(record)
+            for record in frontier_state.get("records", {}).values()
+            if isinstance(record, dict)
+            and record.get("repository_id") == repository_id
+        ),
+        key=lambda item: (str(item.get("lane_id") or ""), int(item.get("frontier_epoch", 0))),
+    )
+    return canonical_json_hash(records)
+
+
+def _project_context_current_requirements(
+    context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    repository_id: str,
+    authority_signal: dict[str, Any] | None,
+) -> dict[str, Any]:
+    validate_project_context_state(context_state)
+    validate_frontier_state(frontier_state)
+    record = context_state.get("contexts", {}).get(repository_id)
+    if not isinstance(record, dict):
+        raise ProtocolError("project context is missing")
+    if context_state.get("repository_status", {}).get(repository_id) != "verified":
+        raise ProtocolError("project context requires reconciliation")
+    if record.get("cross_lane_conflicts"):
+        raise ProtocolError("project context has unresolved cross-lane conflicts")
+    if not isinstance(authority_signal, dict):
+        raise ProtocolError("project context authority signal is missing")
+    validate_authority_signal_liveness(authority_signal)
+    if authority_signal.get("repository_id") != repository_id:
+        raise ProtocolError("project context authority repository mismatch")
+    if authority_signal.get("authority_fingerprint") != record.get(
+        "authority_fingerprint"
+    ):
+        raise ProtocolError("project context authority fingerprint is stale")
+    if record.get("authority_revision") != authority_signal.get("git", {}).get(
+        "head_sha"
+    ):
+        raise ProtocolError("project context authority revision is stale")
+    for lane_id, event_id in record["lane_frontier_event_ids"].items():
+        current = frontier_state.get("records", {}).get(
+            _frontier_key(repository_id, lane_id)
+        )
+        if not isinstance(current, dict):
+            raise ProtocolError(f"project context active lane is missing: {lane_id}")
+        if current.get("frontier_event_id") != event_id:
+            raise ProtocolError(f"project context active lane is stale: {lane_id}")
+    return record
+
+
+def effective_project_context_safety_mode(
+    context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+    repository_ids: Iterable[str] | None = None,
+) -> str:
+    """Derive observed safety without mutating the append-only context ledger."""
+    validate_project_context_state(context_state)
+    validate_frontier_state(frontier_state)
+    signal_by_repository = {
+        str(item.get("repository_id") or ""): item
+        for item in authority_signals
+        if isinstance(item, dict) and item.get("repository_id")
+    }
+    repositories = list(
+        repository_ids
+        if repository_ids is not None
+        else context_state.get("repository_status", {}).keys()
+    )
+    if not repositories:
+        return PROJECT_CONTEXT_SAFETY_MODE
+    for repository_id in repositories:
+        try:
+            _project_context_current_requirements(
+                context_state,
+                frontier_state,
+                str(repository_id),
+                signal_by_repository.get(str(repository_id)),
+            )
+        except ProtocolError:
+            return PROJECT_CONTEXT_SAFETY_MODE
+    return "PROJECT_CONTEXT_VERIFIED"
+
+
+def build_supervisor_context_envelope(
+    context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    repository_id: str,
+    lane_id: str,
+    action_kind: str,
+    authority_signal: dict[str, Any],
+) -> dict[str, Any]:
+    record = _project_context_current_requirements(
+        context_state, frontier_state, repository_id, authority_signal
+    )
+    if lane_id not in record["active_lanes"]:
+        raise ProtocolError("Supervisor context lane is not active")
+    frontier_certificate = issue_frontier_certificate(
+        frontier_state, repository_id, lane_id, authority_signal
+    )
+    lane_frontiers = []
+    for active_lane in sorted(record["active_lanes"]):
+        frontier = frontier_state["records"][_frontier_key(repository_id, active_lane)]
+        lane_frontiers.append(
+            {
+                "lane_id": active_lane,
+                "frontier_epoch": frontier["frontier_epoch"],
+                "frontier_event_id": frontier["frontier_event_id"],
+                "artifact_id": frontier.get("artifact_id"),
+                "artifact_revision": frontier.get("artifact_revision"),
+                "artifact_sha256": frontier.get("artifact_sha256"),
+                "disposition": frontier["disposition"],
+                "source_actor": frontier["source_actor"],
+            }
+        )
+    retired_artifacts = sorted(
+        (
+            copy.deepcopy(item)
+            for item in frontier_state.get("retired_artifacts", [])
+            if isinstance(item, dict)
+            and item.get("repository_id") == repository_id
+        ),
+        key=lambda item: (
+            str(item.get("lane_id") or ""),
+            int(item.get("frontier_epoch", 0)),
+            str(item.get("frontier_event_id") or ""),
+        ),
+    )
+    envelope = {
+        "schema_version": 1,
+        "repository_id": repository_id,
+        "lane_id": lane_id,
+        "action_kind": action_kind,
+        "project_context_revision": record["project_context_revision"],
+        "project_context_event_id": record["project_context_event_id"],
+        "repository_frontier_fingerprint": _repository_frontier_fingerprint(
+            frontier_state, repository_id
+        ),
+        "frontier_certificate": frontier_certificate,
+        "authority_revision": record["authority_revision"],
+        "authority_fingerprint": record["authority_fingerprint"],
+        "north_star": record["north_star"],
+        "current_bottleneck": record["current_bottleneck"],
+        "completion_definition": record["completion_definition"],
+        "roadmap": copy.deepcopy(record["roadmap"]),
+        "active_lanes": copy.deepcopy(record["active_lanes"]),
+        "lane_frontiers": lane_frontiers,
+        "cross_lane_conflicts": copy.deepcopy(record["cross_lane_conflicts"]),
+        "decisions_since_prior": copy.deepcopy(record["decisions_since_prior"]),
+        "evidence_manifest": copy.deepcopy(record["evidence_manifest"]),
+        "omitted_evidence": copy.deepcopy(record["omitted_evidence"]),
+        "retired_artifacts": retired_artifacts,
+    }
+    envelope["envelope_id"] = canonical_json_hash(envelope)
+    return envelope
+
+
+def validate_supervisor_context_envelope(
+    envelope: Any,
+    context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signal: dict[str, Any],
+    *,
+    expected_action_kind: str | None = None,
+) -> None:
+    if not isinstance(envelope, dict):
+        raise ProtocolError("SupervisorContextEnvelope must be an object")
+    repository_id = str(envelope.get("repository_id") or "")
+    lane_id = str(envelope.get("lane_id") or "")
+    action_kind = str(envelope.get("action_kind") or "")
+    if expected_action_kind is not None and action_kind != expected_action_kind:
+        raise ProtocolError("Supervisor context action kind mismatch")
+    expected = build_supervisor_context_envelope(
+        context_state,
+        frontier_state,
+        repository_id,
+        lane_id,
+        action_kind,
+        authority_signal,
+    )
+    if envelope != expected:
+        raise ProtocolError("Supervisor context envelope is stale or incomplete")
+
+
+def validate_supervisor_context_result_binding(
+    envelope: Any,
+    context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    *,
+    expected_action_kind: str,
+) -> None:
+    """Validate the based-on context without rejecting an authorized effect.
+
+    A Worker or Supervisor route may legitimately change Git/authority state.
+    Result identity is independently bound to that new observation elsewhere.
+    This check therefore compare-and-swaps the context event and every lane
+    frontier that existed when the route was issued, while deliberately not
+    requiring the pre-effect authority fingerprint to equal the post-effect
+    observation.
+    """
+    if not isinstance(envelope, dict):
+        raise ProtocolError("SupervisorContextEnvelope must be an object")
+    validate_project_context_state(context_state)
+    validate_frontier_state(frontier_state)
+    hashed = copy.deepcopy(envelope)
+    envelope_id = str(hashed.pop("envelope_id", ""))
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", envelope_id):
+        raise ProtocolError("Supervisor context envelope ID is invalid")
+    if canonical_json_hash(hashed) != envelope_id:
+        raise ProtocolError("Supervisor context envelope ID does not match content")
+    if envelope.get("action_kind") != expected_action_kind:
+        raise ProtocolError("Supervisor context action kind mismatch")
+    repository_id = str(envelope.get("repository_id") or "")
+    lane_id = str(envelope.get("lane_id") or "")
+    record = context_state.get("contexts", {}).get(repository_id)
+    if not isinstance(record, dict):
+        raise ProtocolError("project context is missing")
+    if context_state.get("repository_status", {}).get(repository_id) != "verified":
+        raise ProtocolError("project context requires reconciliation")
+    if envelope.get("project_context_revision") != record.get(
+        "project_context_revision"
+    ) or envelope.get("project_context_event_id") != record.get(
+        "project_context_event_id"
+    ):
+        raise ProtocolError("Supervisor context revision is stale")
+    context_fields = (
+        "authority_revision",
+        "authority_fingerprint",
+        "north_star",
+        "current_bottleneck",
+        "completion_definition",
+        "roadmap",
+        "active_lanes",
+        "cross_lane_conflicts",
+        "decisions_since_prior",
+        "evidence_manifest",
+        "omitted_evidence",
+    )
+    for field in context_fields:
+        if envelope.get(field) != record.get(field):
+            raise ProtocolError(
+                f"Supervisor context {field} differs from the current record"
+            )
+    if lane_id not in record["active_lanes"]:
+        raise ProtocolError("Supervisor context lane is not active")
+    if envelope.get("repository_frontier_fingerprint") != (
+        _repository_frontier_fingerprint(frontier_state, repository_id)
+    ):
+        raise ProtocolError("Supervisor context repository frontier is stale")
+    current_lane_frontiers = []
+    for active_lane in sorted(record["active_lanes"]):
+        frontier = frontier_state.get("records", {}).get(
+            _frontier_key(repository_id, active_lane)
+        )
+        if not isinstance(frontier, dict):
+            raise ProtocolError(
+                f"Supervisor context active lane is missing: {active_lane}"
+            )
+        if record["lane_frontier_event_ids"].get(active_lane) != frontier.get(
+            "frontier_event_id"
+        ):
+            raise ProtocolError(
+                f"Supervisor context active lane is stale: {active_lane}"
+            )
+        current_lane_frontiers.append(
+            {
+                "lane_id": active_lane,
+                "frontier_epoch": frontier["frontier_epoch"],
+                "frontier_event_id": frontier["frontier_event_id"],
+                "artifact_id": frontier.get("artifact_id"),
+                "artifact_revision": frontier.get("artifact_revision"),
+                "artifact_sha256": frontier.get("artifact_sha256"),
+                "disposition": frontier["disposition"],
+                "source_actor": frontier["source_actor"],
+            }
+        )
+    if envelope.get("lane_frontiers") != current_lane_frontiers:
+        raise ProtocolError("Supervisor context lane frontier projection is stale")
+    certificate = envelope.get("frontier_certificate")
+    current = frontier_state["records"][_frontier_key(repository_id, lane_id)]
+    expected_certificate = _frontier_certificate_payload(
+        current,
+        {"authority_fingerprint": envelope.get("authority_fingerprint")},
+    )
+    expected_certificate["certificate_id"] = canonical_json_hash(
+        expected_certificate
+    )
+    if certificate != expected_certificate:
+        raise ProtocolError("Supervisor context frontier certificate is stale")
+
+
+def project_context_gate_decision(
+    context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    repository_id: str,
+    lane_id: str,
+    action_kind: str,
+    authority_signal: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if action_kind in PROJECT_CONTEXT_RECONCILIATION_ACTION_KINDS:
+        return {
+            "classification": "PROJECT_CONTEXT_RECONCILIATION_ALLOWED",
+            "reasons": [],
+            "envelope": None,
+        }
+    if action_kind not in PROJECT_CONTEXT_BOUND_ACTION_KINDS:
+        return {
+            "classification": "PROJECT_CONTEXT_NOT_REQUIRED",
+            "reasons": [],
+            "envelope": None,
+        }
+    try:
+        if not isinstance(authority_signal, dict):
+            raise ProtocolError("project context authority signal is missing")
+        envelope = build_supervisor_context_envelope(
+            context_state,
+            frontier_state,
+            repository_id,
+            lane_id,
+            action_kind,
+            authority_signal,
+        )
+    except ProtocolError as exc:
+        return {
+            "classification": "PROJECT_CONTEXT_RECONCILIATION_REQUIRED",
+            "reasons": [str(exc)],
+            "envelope": None,
+        }
+    return {
+        "classification": "PROJECT_CONTEXT_CERTIFIED",
+        "reasons": [],
+        "envelope": envelope,
+    }
 
 
 def validate_frontier_record(record: Any) -> None:
@@ -1599,8 +2349,13 @@ def validate_portfolio_frontier_consistency(
 ) -> None:
     validate_portfolio_status(portfolio)
     validate_frontier_state(frontier_state)
-    if portfolio.get("schema_version") != FRONTIER_PORTFOLIO_VERSION:
-        raise ProtocolError("portfolio frontier projection requires schema_version 3")
+    if portfolio.get("schema_version") not in {
+        FRONTIER_PORTFOLIO_VERSION,
+        PROJECT_CONTEXT_PORTFOLIO_VERSION,
+    }:
+        raise ProtocolError(
+            "portfolio frontier projection requires schema_version 3 or 4"
+        )
     if portfolio.get("frontier_revision") != frontier_state.get("revision"):
         raise ProtocolError("portfolio frontier revision is stale")
     if portfolio.get("frontier_safety_mode") != frontier_state.get("safety_mode"):
@@ -1640,6 +2395,189 @@ def validate_portfolio_frontier_consistency(
             )
 
 
+def _portfolio_project_context_projection(
+    record: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "project_context_revision": record["project_context_revision"],
+        "project_context_event_id": record["project_context_event_id"],
+        "authority_revision": record["authority_revision"],
+        "authority_fingerprint": record["authority_fingerprint"],
+        "north_star": record["north_star"],
+        "current_bottleneck": record["current_bottleneck"],
+        "completion_definition": record["completion_definition"],
+        "roadmap": copy.deepcopy(record["roadmap"]),
+        "active_lanes": copy.deepcopy(record["active_lanes"]),
+        "lane_frontier_event_ids": copy.deepcopy(
+            record["lane_frontier_event_ids"]
+        ),
+        "cross_lane_conflicts": copy.deepcopy(record["cross_lane_conflicts"]),
+        "decisions_since_prior": copy.deepcopy(record["decisions_since_prior"]),
+        "evidence_manifest": copy.deepcopy(record["evidence_manifest"]),
+        "omitted_evidence": copy.deepcopy(record["omitted_evidence"]),
+    }
+
+
+def migrate_portfolio_to_project_context_v4(
+    portfolio: dict[str, Any],
+    project_context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    signals = list(authority_signals)
+    if portfolio.get("schema_version") == PROJECT_CONTEXT_PORTFOLIO_VERSION:
+        migrated = copy.deepcopy(portfolio)
+    else:
+        migrated = migrate_portfolio_to_frontier_v3(
+            portfolio, frontier_state, signals
+        )
+    validate_project_context_state(project_context_state)
+    migrated["schema_version"] = PROJECT_CONTEXT_PORTFOLIO_VERSION
+    migrated["project_context_revision"] = project_context_state["revision"]
+    signal_by_repository = {
+        str(item.get("repository_id") or ""): item
+        for item in signals
+        if isinstance(item, dict) and item.get("repository_id")
+    }
+    migrated["project_context_safety_mode"] = (
+        effective_project_context_safety_mode(
+            project_context_state,
+            frontier_state,
+            signals,
+            (
+                str(row.get("repository_id") or "")
+                for row in migrated.get("repositories", [])
+                if isinstance(row, dict)
+            ),
+        )
+    )
+    for row in migrated.get("repositories", []):
+        if not isinstance(row, dict):
+            continue
+        repository_id = str(row.get("repository_id") or "")
+        record = project_context_state.get("contexts", {}).get(repository_id)
+        certified = False
+        if isinstance(record, dict):
+            try:
+                _project_context_current_requirements(
+                    project_context_state,
+                    frontier_state,
+                    repository_id,
+                    signal_by_repository.get(repository_id),
+                )
+                certified = True
+            except ProtocolError:
+                certified = False
+        if certified:
+            row["project_context_status"] = "verified"
+            row["project_context_revision"] = record[
+                "project_context_revision"
+            ]
+            row["project_context_event_id"] = record[
+                "project_context_event_id"
+            ]
+            row["project_context"] = _portfolio_project_context_projection(
+                record
+            )
+            row["roadmap"] = copy.deepcopy(record["roadmap"])
+        else:
+            status = str(
+                project_context_state.get("repository_status", {}).get(
+                    repository_id, "legacy_unverified"
+                )
+            )
+            row["project_context_status"] = (
+                status
+                if status
+                in {
+                    "legacy_unverified",
+                    "reconciliation_required",
+                    "authority_conflict",
+                }
+                else "reconciliation_required"
+            )
+            row["project_context_revision"] = (
+                record.get("project_context_revision")
+                if isinstance(record, dict)
+                else None
+            )
+            row["project_context_event_id"] = (
+                record.get("project_context_event_id")
+                if isinstance(record, dict)
+                else None
+            )
+            row["project_context"] = None
+            row["state"] = "READY"
+            row["why"] = (
+                "The project-wide current context is missing or stale."
+            )
+            row["next_move"] = (
+                "Reconcile the project context against every active lane and "
+                "the current authority observation."
+            )
+            row["roadmap"] = {
+                "overall_position": "project context reconciliation",
+                "current_block": "verify the current project position",
+                "next_gate": "ProjectContextRecord accepted",
+                "completion_definition": (
+                    "North star, roadmap, evidence, and every active lane "
+                    "frontier agree."
+                ),
+                "completed_blocks": [],
+                "next_blocks": ["apply one exact reconciliation event"],
+            }
+    migrated["semantic_fingerprint"] = portfolio_semantic_fingerprint(migrated)
+    validate_portfolio_status(migrated)
+    return migrated
+
+
+def validate_portfolio_project_context_consistency(
+    portfolio: dict[str, Any],
+    project_context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+) -> None:
+    validate_portfolio_status(portfolio)
+    if portfolio.get("schema_version") != PROJECT_CONTEXT_PORTFOLIO_VERSION:
+        raise ProtocolError(
+            "portfolio project-context projection requires schema_version 4"
+        )
+    expected = migrate_portfolio_to_project_context_v4(
+        portfolio,
+        project_context_state,
+        frontier_state,
+        list(authority_signals),
+    )
+    for field in (
+        "project_context_revision",
+        "project_context_safety_mode",
+    ):
+        if portfolio.get(field) != expected.get(field):
+            raise ProtocolError(f"portfolio {field} is stale")
+    expected_by_repository = {
+        str(row.get("repository_id") or ""): row
+        for row in expected.get("repositories", [])
+        if isinstance(row, dict)
+    }
+    for row in portfolio.get("repositories", []):
+        repository_id = str(row.get("repository_id") or "")
+        expected_row = expected_by_repository.get(repository_id, {})
+        for field in (
+            "project_context_status",
+            "project_context_revision",
+            "project_context_event_id",
+            "project_context",
+            "roadmap",
+            "state",
+            "why",
+            "next_move",
+        ):
+            if row.get(field) != expected_row.get(field):
+                raise ProtocolError(
+                    f"portfolio project context {repository_id} {field} is stale"
+                )
+
+
 def _normalize_portfolio_active_route(
     route: Any, *, label: str
 ) -> dict[str, Any]:
@@ -1670,13 +2608,20 @@ def _normalize_portfolio_active_route(
 
 def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
     version = portfolio.get("schema_version")
-    if version not in {2, FRONTIER_PORTFOLIO_VERSION}:
-        raise ProtocolError("portfolio status schema_version must be 2 or 3")
+    if version not in {
+        2,
+        FRONTIER_PORTFOLIO_VERSION,
+        PROJECT_CONTEXT_PORTFOLIO_VERSION,
+    }:
+        raise ProtocolError("portfolio status schema_version must be 2, 3, or 4")
     if not re.fullmatch(
         r"[0-9a-fA-F]{64}", str(portfolio.get("semantic_fingerprint") or "")
     ):
         raise ProtocolError("portfolio semantic_fingerprint must be SHA-256")
-    if version == FRONTIER_PORTFOLIO_VERSION:
+    if version in {
+        FRONTIER_PORTFOLIO_VERSION,
+        PROJECT_CONTEXT_PORTFOLIO_VERSION,
+    }:
         if portfolio.get("semantic_fingerprint") != portfolio_semantic_fingerprint(
             portfolio
         ):
@@ -1694,6 +2639,20 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
             "FRONTIER_VERIFIED",
         }:
             raise ProtocolError("portfolio frontier_safety_mode is invalid")
+    if version == PROJECT_CONTEXT_PORTFOLIO_VERSION:
+        if not isinstance(portfolio.get("project_context_revision"), int) or portfolio[
+            "project_context_revision"
+        ] < 0:
+            raise ProtocolError(
+                "portfolio project_context_revision must be non-negative"
+            )
+        if portfolio.get("project_context_safety_mode") not in {
+            PROJECT_CONTEXT_SAFETY_MODE,
+            "PROJECT_CONTEXT_VERIFIED",
+        }:
+            raise ProtocolError(
+                "portfolio project_context_safety_mode is invalid"
+            )
     if portfolio.get("coordinator_availability") != "AVAILABLE":
         raise ProtocolError("portfolio coordinator_availability must be AVAILABLE")
     if portfolio.get("execution_state") not in {
@@ -1780,7 +2739,10 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
         if not repository_id or repository_id in seen:
             raise ProtocolError("portfolio repository_id must be unique and non-empty")
         seen.add(repository_id)
-        if version == FRONTIER_PORTFOLIO_VERSION:
+        if version in {
+            FRONTIER_PORTFOLIO_VERSION,
+            PROJECT_CONTEXT_PORTFOLIO_VERSION,
+        }:
             if row.get("frontier_status") not in {
                 "verified",
                 "legacy_unverified",
@@ -1792,6 +2754,42 @@ def validate_portfolio_status(portfolio: dict[str, Any]) -> None:
             ):
                 raise ProtocolError(
                     "portfolio frontier_certificate must be object or null"
+                )
+        if version == PROJECT_CONTEXT_PORTFOLIO_VERSION:
+            if row.get("project_context_status") not in {
+                "verified",
+                "legacy_unverified",
+                "reconciliation_required",
+                "authority_conflict",
+            }:
+                raise ProtocolError("portfolio project_context_status is invalid")
+            if row.get("project_context") is not None and not isinstance(
+                row.get("project_context"), dict
+            ):
+                raise ProtocolError(
+                    "portfolio project_context must be object or null"
+                )
+            if row.get("project_context_status") == "verified":
+                context_projection = row.get("project_context")
+                if not isinstance(context_projection, dict):
+                    raise ProtocolError(
+                        "verified portfolio project context requires its projection"
+                    )
+                if row.get("project_context_revision") != context_projection.get(
+                    "project_context_revision"
+                ) or row.get("project_context_event_id") != context_projection.get(
+                    "project_context_event_id"
+                ):
+                    raise ProtocolError(
+                        "portfolio project context identity is inconsistent"
+                    )
+                if row.get("roadmap") != context_projection.get("roadmap"):
+                    raise ProtocolError(
+                        "portfolio roadmap differs from certified project context"
+                    )
+            elif row.get("project_context") is not None:
+                raise ProtocolError(
+                    "unverified portfolio project context must not expose a stale projection"
                 )
         if row.get("state") not in PORTFOLIO_PROJECT_STATES:
             raise ProtocolError(f"invalid portfolio project state: {row.get('state')}")
@@ -2025,6 +3023,13 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
         f"- Execution: `{_markdown_cell(portfolio.get('execution_state', 'IDLE'))}`",
         f"- Active routes: `{_markdown_cell(portfolio.get('active_route_count', 0))} / {_markdown_cell(portfolio.get('concurrency_limit', 3))}`",
     ]
+    if portfolio.get("schema_version") == PROJECT_CONTEXT_PORTFOLIO_VERSION:
+        lines.extend(
+            [
+                f"- Project context: `{_markdown_cell(portfolio.get('project_context_safety_mode'))}`",
+                f"- Project-context revision: `{_markdown_cell(portfolio.get('project_context_revision'))}`",
+            ]
+        )
     next_user_action = portfolio.get("next_user_action")
     lines.extend(["", "## Next user action", ""])
     if next_user_action is None:
@@ -2186,6 +3191,43 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
             )
             + " |"
         )
+    if portfolio.get("schema_version") == PROJECT_CONTEXT_PORTFOLIO_VERSION:
+        lines.extend(
+            [
+                "",
+                "## Certified project context",
+                "",
+                "| Project | Status | North star | Current bottleneck | Active lanes | Evidence | Omitted |",
+                "|---|---|---|---|---|---|---|",
+            ]
+        )
+        for row in repositories:
+            context_projection = row.get("project_context")
+            if isinstance(context_projection, dict):
+                values = (
+                    row.get("project_name") or row["repository_id"],
+                    row.get("project_context_status"),
+                    context_projection.get("north_star"),
+                    context_projection.get("current_bottleneck"),
+                    ", ".join(context_projection.get("active_lanes", [])),
+                    str(len(context_projection.get("evidence_manifest", []))),
+                    str(len(context_projection.get("omitted_evidence", []))),
+                )
+            else:
+                values = (
+                    row.get("project_name") or row["repository_id"],
+                    row.get("project_context_status"),
+                    "not certified",
+                    "reconciliation required",
+                    "not certified",
+                    "0",
+                    "unknown",
+                )
+            lines.append(
+                "| "
+                + " | ".join(_markdown_cell(value) for value in values)
+                + " |"
+            )
     for row in repositories:
         stop = row.get("stop")
         if not isinstance(stop, dict):
@@ -3557,7 +4599,8 @@ def _action_observer_kind(action: dict[str, Any]) -> str | None:
         "await_supervisor_work_order",
         "resolve_mission_value_gate",
         "return_worker_result",
-        "request_next_mission",
+    "request_next_mission",
+    "probe_authorized_runtime_repair",
         "return_authorized_runtime_recovery_result",
     }:
         return "chatgpt_poll"
@@ -4436,7 +5479,8 @@ def _selection_route(
         "await_supervisor_verdict",
         "await_supervisor_work_order",
         "resolve_mission_value_gate",
-        "return_worker_result",
+    "return_worker_result",
+    "return_authorized_runtime_recovery_result",
         "request_next_mission",
     }:
         recipient_kind = "supervisor"
@@ -5492,6 +6536,20 @@ def _bind_frontier_certificate_to_action(
     return bound
 
 
+def _bind_supervisor_context_to_action(
+    action: dict[str, Any], envelope: dict[str, Any]
+) -> dict[str, Any]:
+    bound = copy.deepcopy(action)
+    payload = bound.setdefault("payload", {})
+    payload["supervisor_context_envelope"] = copy.deepcopy(envelope)
+    identity = {
+        "kind": bound["kind"],
+        "payload": _semantic_scheduler_value(payload),
+    }
+    bound["action_id"] = canonical_json_hash(identity)[:32]
+    return bound
+
+
 def build_coordinator_plan(
     registry: dict[str, Any],
     hosts: dict[str, Any],
@@ -5502,6 +6560,7 @@ def build_coordinator_plan(
     *,
     authority_signals: Iterable[dict[str, Any]] | None = None,
     frontier_state: dict[str, Any] | None = None,
+    project_context_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the one deterministic plan shared by status and recovery."""
     _ensure_scheduler_state_v2(scheduler_state)
@@ -5525,6 +6584,21 @@ def build_coordinator_plan(
     frontier_view = (
         migrate_frontier_state(frontier_state, repository_order)
         if frontier_state is not None
+        else None
+    )
+    project_context_view = (
+        migrate_project_context_state(project_context_state, repository_order)
+        if project_context_state is not None
+        else None
+    )
+    effective_context_safety_mode = (
+        effective_project_context_safety_mode(
+            project_context_view,
+            frontier_view,
+            signals,
+            repository_order,
+        )
+        if project_context_view is not None and frontier_view is not None
         else None
     )
     repository_fingerprints = {
@@ -5553,6 +6627,11 @@ def build_coordinator_plan(
                 if frontier_view is not None
                 else None
             ),
+            "project_context": (
+                _semantic_scheduler_value(project_context_view)
+                if project_context_view is not None
+                else None
+            ),
         }
     )
     completed_ids = {
@@ -5562,6 +6641,7 @@ def build_coordinator_plan(
     }
     candidates: list[dict[str, Any]] = []
     frontier_gate_report: list[dict[str, Any]] = []
+    project_context_gate_report: list[dict[str, Any]] = []
     if frontier_view is not None:
         lane_by_repository: dict[str, set[str]] = {
             repository_id: {
@@ -5622,6 +6702,91 @@ def build_coordinator_plan(
                     )
                     if action["action_id"] not in completed_ids:
                         candidates.append(action)
+    if project_context_view is not None and frontier_view is not None:
+        for repository_id in repository_order:
+            context_record = project_context_view.get("contexts", {}).get(
+                repository_id
+            )
+            default_lane = next(
+                (
+                    str(item.get("default_supervision_lane") or "default")
+                    for item in registry.get("repositories", [])
+                    if isinstance(item, dict)
+                    and item.get("repository_id") == repository_id
+                ),
+                "default",
+            )
+            active_lanes = (
+                list(context_record.get("active_lanes", []))
+                if isinstance(context_record, dict)
+                else []
+            )
+            lane = str(active_lanes[0]) if active_lanes else default_lane
+            decision = project_context_gate_decision(
+                project_context_view,
+                frontier_view,
+                repository_id,
+                lane,
+                action_kind="advance_mission",
+                authority_signal=signal_by_repository.get(repository_id),
+            )
+            project_context_gate_report.append(
+                {
+                    "repository_id": repository_id,
+                    "lane_id": lane,
+                    "action_kind": "advance_mission",
+                    **copy.deepcopy(decision),
+                }
+            )
+            if decision["classification"] != "PROJECT_CONTEXT_CERTIFIED":
+                current_lane_frontiers = sorted(
+                    (
+                        copy.deepcopy(record)
+                        for record in frontier_view.get("records", {}).values()
+                        if isinstance(record, dict)
+                        and record.get("repository_id") == repository_id
+                    ),
+                    key=lambda item: str(item.get("lane_id") or ""),
+                )
+                action = _scheduler_action(
+                    "reconcile_project_context",
+                    {
+                        "repository_id": repository_id,
+                        "lane_id": lane,
+                        "reasons": decision["reasons"],
+                        "authority_signal": signal_by_repository.get(
+                            repository_id
+                        ),
+                        "current_context": copy.deepcopy(context_record),
+                        "current_lane_frontiers": current_lane_frontiers,
+                        "project_context_safety_mode": (
+                            effective_context_safety_mode
+                        ),
+                        "reconciliation_contract": {
+                            "schema": "project-context-record.v1",
+                            "apply_command": "project-context-apply-event",
+                            "required_scope": [
+                                "north_star",
+                                "roadmap",
+                                "current_bottleneck",
+                                "completion_definition",
+                                "every_active_lane_frontier_event_id",
+                                "decisions_since_prior",
+                                "evidence_manifest",
+                                "omitted_evidence",
+                                "current_authority_fingerprint",
+                            ],
+                            "inference_boundary": (
+                                "do not choose current state by timestamp, "
+                                "chat recency, filename, or portfolio order"
+                            ),
+                        },
+                    },
+                    priority=6,
+                    stable_order=repository_order[repository_id],
+                )
+                if action["action_id"] not in completed_ids:
+                    candidates.append(action)
     runtime_candidates, runtime_action_repositories = (
         _authorized_runtime_candidates(
             coordinator_state,
@@ -5975,6 +7140,54 @@ def build_coordinator_plan(
                     }
                 )
         candidates = gated_candidates
+
+    if project_context_view is not None and frontier_view is not None:
+        context_gated_candidates: list[dict[str, Any]] = []
+        for action in candidates:
+            repository_id, lane, _ = _frontier_action_context(
+                action, registry, mission_list
+            )
+            if not repository_id:
+                context_gated_candidates.append(action)
+                continue
+            decision = project_context_gate_decision(
+                project_context_view,
+                frontier_view,
+                repository_id,
+                lane,
+                action_kind=str(action.get("kind") or ""),
+                authority_signal=signal_by_repository.get(repository_id),
+            )
+            if decision["classification"] in {
+                "PROJECT_CONTEXT_RECONCILIATION_ALLOWED",
+                "PROJECT_CONTEXT_NOT_REQUIRED",
+            }:
+                context_gated_candidates.append(action)
+            elif decision["classification"] == "PROJECT_CONTEXT_CERTIFIED":
+                context_gated_candidates.append(
+                    _bind_supervisor_context_to_action(
+                        action, decision["envelope"]
+                    )
+                )
+            else:
+                project_context_gate_report.append(
+                    {
+                        "repository_id": repository_id,
+                        "lane_id": lane,
+                        "action_kind": action.get("kind"),
+                        **copy.deepcopy(decision),
+                    }
+                )
+        candidates = context_gated_candidates
+
+    # Frontier certificates and project-context envelopes participate in the
+    # final action identity. Completed IDs therefore have to be filtered after
+    # both bindings, not only against the earlier unbound candidate identity.
+    candidates = [
+        action
+        for action in candidates
+        if str(action.get("action_id") or "") not in completed_ids
+    ]
 
     round_robin_cursor = scheduler_state.get(
         "round_robin_cursor_repository_id"
@@ -6335,6 +7548,15 @@ def build_coordinator_plan(
                 else None
             ),
             "frontier_gate": frontier_gate_report,
+            "project_context_revision": (
+                project_context_view.get("revision")
+                if project_context_view is not None
+                else None
+            ),
+            "project_context_safety_mode": (
+                effective_context_safety_mode
+            ),
+            "project_context_gate": project_context_gate_report,
             "ready_actions": ready_actions,
             "required_handoff_actions": required_handoff_actions,
             "protocol_handoff_required": bool(required_handoff_actions),
@@ -8357,6 +9579,26 @@ def _validate_external_result_identity(
         if not isinstance(result.get(field), str) or not result[field].strip():
             raise ProtocolError(f"external result requires {field}")
     action = lease.get("action", {})
+    context_envelope = action.get("payload", {}).get(
+        "supervisor_context_envelope"
+    )
+    if isinstance(context_envelope, dict):
+        for field in (
+            "supervisor_context_envelope_id",
+            "based_on_project_context_revision",
+        ):
+            if field not in result:
+                raise ProtocolError(
+                    f"external result requires {field} for a context-bound action"
+                )
+        if result.get("supervisor_context_envelope_id") != context_envelope.get(
+            "envelope_id"
+        ):
+            raise ProtocolError("external result Supervisor context identity mismatch")
+        if result.get("based_on_project_context_revision") != context_envelope.get(
+            "project_context_revision"
+        ):
+            raise ProtocolError("external result project context revision mismatch")
     route = action.get("payload", {}).get("route", {})
     expected = {
         "action_id": lease.get("action_id"),
@@ -8607,9 +9849,12 @@ def _refresh_portfolio_after_external_result(
     frontier_state: dict[str, Any],
     missions: list[dict[str, Any]],
     authority_signals: Iterable[dict[str, Any]],
+    *,
+    project_context_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    signals = list(authority_signals)
     refreshed = migrate_portfolio_to_frontier_v3(
-        portfolio, frontier_state, authority_signals
+        portfolio, frontier_state, signals
     )
     scheduler, routes = _active_scheduler_delivery_routes(scheduler_state)
     refreshed["scheduler_revision"] = scheduler["revision"]
@@ -8661,6 +9906,19 @@ def _refresh_portfolio_after_external_result(
                 row["next_move"] = "Reconcile and certify any later frontier event."
     refreshed["frontier_revision"] = frontier_state["revision"]
     refreshed["frontier_safety_mode"] = frontier_state["safety_mode"]
+    if project_context_state is not None:
+        refreshed = migrate_portfolio_to_project_context_v4(
+            refreshed,
+            project_context_state,
+            frontier_state,
+            signals,
+        )
+        validate_portfolio_project_context_consistency(
+            refreshed,
+            project_context_state,
+            frontier_state,
+            signals,
+        )
     refreshed["semantic_fingerprint"] = portfolio_semantic_fingerprint(refreshed)
     return refreshed
 
@@ -8674,12 +9932,15 @@ def apply_external_result_transaction(
     result: dict[str, Any],
     *,
     observed_authority_signal: dict[str, Any] | None = None,
+    project_context_state: dict[str, Any] | None = None,
     coordinator_state: dict[str, Any] | None = None,
     actor_task_id: str | None = None,
 ) -> dict[str, Any]:
     """Atomically reduce one exact result across all semantic projections."""
     _ensure_scheduler_state_v2(scheduler_state)
     validate_frontier_state(frontier_state)
+    if project_context_state is not None:
+        validate_project_context_state(project_context_state)
     result_id = str(result.get("result_id") or "") if isinstance(result, dict) else ""
     result_hash = canonical_json_hash(result) if isinstance(result, dict) else ""
     prior = next(
@@ -8775,7 +10036,12 @@ def apply_external_result_transaction(
                 scheduler_work,
                 frontier_work,
                 missions_work,
-                [],
+                (
+                    [observed_authority_signal]
+                    if isinstance(observed_authority_signal, dict)
+                    else []
+                ),
+                project_context_state=project_context_state,
             )
             validate_frontier_state(frontier_work)
             _validate_scheduler_state_v2(scheduler_work)
@@ -8783,7 +10049,13 @@ def apply_external_result_transaction(
                 portfolio_work, scheduler_work
             )
             validate_portfolio_frontier_consistency(
-                portfolio_work, frontier_work, []
+                portfolio_work,
+                frontier_work,
+                (
+                    [observed_authority_signal]
+                    if isinstance(observed_authority_signal, dict)
+                    else []
+                ),
             )
             scheduler_state.clear()
             scheduler_state.update(scheduler_work)
@@ -8798,6 +10070,109 @@ def apply_external_result_transaction(
             "reason": str(exc),
             "deduplicated": False,
         }
+    context_envelope = lease.get("action", {}).get("payload", {}).get(
+        "supervisor_context_envelope"
+    )
+    if isinstance(context_envelope, dict):
+        context_stale_reason: str | None = None
+        try:
+            if project_context_state is None:
+                raise ProtocolError(
+                    "context-bound external result requires project context state"
+                )
+            if not isinstance(observed_authority_signal, dict):
+                raise ProtocolError(
+                    "context-bound external result requires current authority"
+                )
+            validate_supervisor_context_result_binding(
+                context_envelope,
+                project_context_state,
+                frontier_work,
+                expected_action_kind=str(
+                    lease.get("action", {}).get("kind") or ""
+                ),
+            )
+        except ProtocolError as exc:
+            context_stale_reason = str(exc)
+        if context_stale_reason is not None:
+            repository_id = str(result.get("repository_id") or "")
+            current_context = project_context_state.get("contexts", {}).get(
+                repository_id
+            ) if isinstance(project_context_state, dict) else None
+            expected_context_revision = (
+                current_context.get("project_context_revision")
+                if isinstance(current_context, dict)
+                else None
+            )
+            based_on_context_revision = result.get(
+                "based_on_project_context_revision"
+            )
+            _set_external_lifecycle(
+                lease,
+                "stale_result_quarantined",
+                details={
+                    "result_id": result_id,
+                    "reason": context_stale_reason,
+                    "expected_project_context_revision": expected_context_revision,
+                    "based_on_project_context_revision": based_on_context_revision,
+                },
+            )
+            frontier_work["quarantined_results"].append(
+                {
+                    "result_id": result_id,
+                    "action_id": action_id,
+                    "repository_id": repository_id,
+                    "lane_id": result.get("lane_id"),
+                    "result_sha256": result_hash,
+                    "reason": context_stale_reason,
+                    "expected_project_context_revision": expected_context_revision,
+                    "based_on_project_context_revision": based_on_context_revision,
+                    "recorded_at": utc_now(),
+                }
+            )
+            frontier_work["revision"] += 1
+            quarantine_evidence = {
+                "result_id": result_id,
+                "result_sha256": result_hash,
+                "reason": context_stale_reason,
+                "expected_project_context_revision": expected_context_revision,
+                "based_on_project_context_revision": based_on_context_revision,
+            }
+            _close_terminal_external_route(
+                scheduler_work,
+                lease_index,
+                outcome="stale_project_context_result_quarantined",
+                evidence=quarantine_evidence,
+            )
+            portfolio_work = _refresh_portfolio_after_external_result(
+                portfolio_work,
+                scheduler_work,
+                frontier_work,
+                missions_work,
+                [result["authority_signal"]],
+                project_context_state=project_context_state,
+            )
+            validate_frontier_state(frontier_work)
+            _validate_scheduler_state_v2(scheduler_work)
+            validate_portfolio_scheduler_consistency(
+                portfolio_work, scheduler_work
+            )
+            validate_portfolio_frontier_consistency(
+                portfolio_work, frontier_work, [result["authority_signal"]]
+            )
+            scheduler_state.clear()
+            scheduler_state.update(scheduler_work)
+            frontier_state.clear()
+            frontier_state.update(frontier_work)
+            portfolio.clear()
+            portfolio.update(portfolio_work)
+            return {
+                "classification": "STALE_PROJECT_CONTEXT_RESULT_QUARANTINED",
+                "action_id": action_id,
+                "result_id": result_id,
+                "expected_project_context_revision": expected_context_revision,
+                "deduplicated": False,
+            }
     key = _frontier_key(result["repository_id"], result["lane_id"])
     current = frontier_work["records"].get(key)
     current_epoch = int(current.get("frontier_epoch", 0)) if current else 0
@@ -8842,6 +10217,7 @@ def apply_external_result_transaction(
             frontier_work,
             missions_work,
             [result["authority_signal"]],
+            project_context_state=project_context_state,
         )
         validate_frontier_state(frontier_work)
         _validate_scheduler_state_v2(scheduler_work)
@@ -8917,6 +10293,7 @@ def apply_external_result_transaction(
             frontier_work,
             missions_work,
             [result["authority_signal"]],
+            project_context_state=project_context_state,
         )
         validate_frontier_state(frontier_work)
         _validate_scheduler_state_v2(scheduler_work)
@@ -8988,6 +10365,7 @@ def apply_external_result_transaction(
         frontier_work,
         missions_work,
         [result["authority_signal"]],
+        project_context_state=project_context_state,
     )
     validate_frontier_state(frontier_work)
     _validate_scheduler_state_v2(scheduler_work)
@@ -9028,6 +10406,7 @@ def apply_external_result_transaction_files(
     *,
     scheduler_path: Path | str,
     frontier_path: Path | str,
+    project_context_path: Path | str | None = None,
     missions_dir: Path | str,
     portfolio_path: Path | str,
     journal_dir: Path | str,
@@ -9114,6 +10493,17 @@ def apply_external_result_transaction_files(
         frontier_path,
         (str(item.get("repository_id") or "") for item in missions),
     )
+    project_context = (
+        load_project_context_state(
+            project_context_path,
+            {
+                str(item.get("repository_id") or "") for item in missions
+            }
+            | {str(result.get("repository_id") or "")},
+        )
+        if project_context_path is not None
+        else None
+    )
     original_missions = copy.deepcopy(missions)
     outcome = apply_external_result_transaction(
         scheduler,
@@ -9123,6 +10513,7 @@ def apply_external_result_transaction_files(
         action_id,
         result,
         observed_authority_signal=observed_authority_signal,
+        project_context_state=project_context,
         coordinator_state=coordinator,
         actor_task_id=actor_task_id,
     )
@@ -9303,6 +10694,133 @@ def audit_frontier_state(
         "verified_frontier_count": len(frontier["records"]),
         "quarantined_result_count": len(frontier["quarantined_results"]),
         "portfolio_status": portfolio_status,
+        "findings": findings,
+        "dry_run": True,
+        "mutated": False,
+    }
+
+
+def validate_project_context_event_against_observations(
+    candidate: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signal: dict[str, Any] | None,
+) -> None:
+    """Require one context event to name the exact observed project frontier."""
+    validate_project_context_record(candidate)
+    validate_frontier_state(frontier_state)
+    repository_id = str(candidate["repository_id"])
+    if not isinstance(authority_signal, dict):
+        raise ProtocolError("project context event authority signal is missing")
+    validate_authority_signal_liveness(authority_signal)
+    if authority_signal.get("repository_id") != repository_id:
+        raise ProtocolError("project context event authority repository mismatch")
+    if candidate.get("authority_fingerprint") != authority_signal.get(
+        "authority_fingerprint"
+    ):
+        raise ProtocolError("project context event authority fingerprint is stale")
+    if candidate.get("authority_revision") != authority_signal.get("git", {}).get(
+        "head_sha"
+    ):
+        raise ProtocolError("project context event authority revision is stale")
+    for lane_id, event_id in candidate["lane_frontier_event_ids"].items():
+        frontier = frontier_state.get("records", {}).get(
+            _frontier_key(repository_id, lane_id)
+        )
+        if not isinstance(frontier, dict):
+            raise ProtocolError(
+                f"project context event active lane is missing: {lane_id}"
+            )
+        if frontier.get("frontier_event_id") != event_id:
+            raise ProtocolError(
+                f"project context event active lane is stale: {lane_id}"
+            )
+
+
+def audit_project_context_state(
+    registry: dict[str, Any],
+    project_context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    """Read-only project-wide context and cross-lane frontier audit."""
+    repository_ids = [
+        str(item.get("repository_id") or "")
+        for item in registry.get("repositories", [])
+        if isinstance(item, dict) and item.get("repository_id")
+    ]
+    context = migrate_project_context_state(
+        project_context_state, repository_ids
+    )
+    frontier = migrate_frontier_state(frontier_state, repository_ids)
+    signal_by_repository = {
+        str(item.get("repository_id") or ""): item
+        for item in authority_signals
+        if isinstance(item, dict) and item.get("repository_id")
+    }
+    findings: list[dict[str, Any]] = []
+    for repository in registry.get("repositories", []):
+        if not isinstance(repository, dict):
+            continue
+        repository_id = str(repository.get("repository_id") or "")
+        record = context.get("contexts", {}).get(repository_id)
+        lane = (
+            str(record.get("active_lanes", [""])[0])
+            if isinstance(record, dict) and record.get("active_lanes")
+            else str(repository.get("default_supervision_lane") or "default")
+        )
+        decision = project_context_gate_decision(
+            context,
+            frontier,
+            repository_id,
+            lane,
+            action_kind="advance_mission",
+            authority_signal=signal_by_repository.get(repository_id),
+        )
+        if decision["classification"] != "PROJECT_CONTEXT_CERTIFIED":
+            findings.append(
+                {
+                    "repository_id": repository_id,
+                    "lane_id": lane,
+                    "classification": "PROJECT_CONTEXT_RECONCILIATION_REQUIRED",
+                    "repository_status": context.get(
+                        "repository_status", {}
+                    ).get(repository_id, "legacy_unverified"),
+                    "reasons": decision["reasons"],
+                    "recommended_reconciliation_event": {
+                        "kind": "project_context_reconciliation_event",
+                        "based_on_project_context_revision": (
+                            int(record.get("project_context_revision", 0))
+                            if isinstance(record, dict)
+                            else 0
+                        ),
+                        "required_evidence": [
+                            "current north star and completion definition",
+                            "current roadmap position and bottleneck",
+                            "every active lane frontier event ID",
+                            "decisions, omitted evidence, and retired artifacts",
+                            "current independent authority observation",
+                        ],
+                        "candidate_event_generated": False,
+                    },
+                }
+            )
+    return {
+        "classification": (
+            "PROJECT_CONTEXT_AUDIT_CLEAR"
+            if not findings
+            else "PROJECT_CONTEXT_RECONCILIATION_REQUIRED"
+        ),
+        "schema_version": PROJECT_CONTEXT_STATE_VERSION,
+        "safety_mode": effective_project_context_safety_mode(
+            context, frontier, signal_by_repository.values(), repository_ids
+        ),
+        "project_context_revision": context["revision"],
+        "repository_count": len(repository_ids),
+        "verified_context_count": sum(
+            1
+            for status in context["repository_status"].values()
+            if status == "verified"
+        ),
         "findings": findings,
         "dry_run": True,
         "mutated": False,
@@ -11844,7 +13362,7 @@ def _live_mutation_targets(args: argparse.Namespace) -> list[Path]:
         "mission-blocker-contract": ("mission",),
         "mission-continue": ("missions_dir",),
         "terminal": ("terminal_dir", "ledger"),
-        "portfolio-render": ("output",),
+        "portfolio-render": ("input", "output"),
         "coordinator-action-claim": ("scheduler_state",),
         "coordinator-action-prepare": ("scheduler_state",),
         "coordinator-action-sent": ("scheduler_state",),
@@ -11857,6 +13375,7 @@ def _live_mutation_targets(args: argparse.Namespace) -> list[Path]:
             "portfolio",
             "journal_dir",
         ),
+        "project-context-apply-event": ("project_context_state",),
         "coordinator-action-complete": ("scheduler_state", "coordinator_state"),
         "coordinator-action-release": ("scheduler_state",),
         "authorized-runtime-action-register": ("coordinator_state",),
@@ -11933,6 +13452,7 @@ def _require_canonical_live_mutation_paths(args: argparse.Namespace) -> None:
             "output": DEFAULT_PORTFOLIO_MARKDOWN,
             "scheduler_state": DEFAULT_SCHEDULER_STATE,
             "frontier_state": DEFAULT_FRONTIER_STATE,
+            "project_context_state": DEFAULT_PROJECT_CONTEXT_STATE,
             "registry": DEFAULT_BINDINGS,
             "hosts": DEFAULT_HOSTS,
             "adapter": DEFAULT_ADAPTER,
@@ -11946,6 +13466,8 @@ def _require_canonical_live_mutation_paths(args: argparse.Namespace) -> None:
             "adapter": DEFAULT_ADAPTER,
             "missions_dir": DEFAULT_MISSIONS,
             "scheduler_state": DEFAULT_SCHEDULER_STATE,
+            "frontier_state": DEFAULT_FRONTIER_STATE,
+            "project_context_state": DEFAULT_PROJECT_CONTEXT_STATE,
         },
         "coordinator-action-prepare": {
             "scheduler_state": DEFAULT_SCHEDULER_STATE
@@ -11958,9 +13480,18 @@ def _require_canonical_live_mutation_paths(args: argparse.Namespace) -> None:
             "coordinator_state": DEFAULT_COORDINATOR_STATE,
             "scheduler_state": DEFAULT_SCHEDULER_STATE,
             "frontier_state": DEFAULT_FRONTIER_STATE,
+            "project_context_state": DEFAULT_PROJECT_CONTEXT_STATE,
             "missions_dir": DEFAULT_MISSIONS,
             "portfolio": DEFAULT_PORTFOLIO_JSON,
             "journal_dir": DEFAULT_FRONTIER_JOURNAL,
+        },
+        "project-context-apply-event": {
+            "coordinator_state": DEFAULT_COORDINATOR_STATE,
+            "registry": DEFAULT_BINDINGS,
+            "hosts": DEFAULT_HOSTS,
+            "adapter": DEFAULT_ADAPTER,
+            "frontier_state": DEFAULT_FRONTIER_STATE,
+            "project_context_state": DEFAULT_PROJECT_CONTEXT_STATE,
         },
         "coordinator-action-complete": {
             "scheduler_state": DEFAULT_SCHEDULER_STATE
@@ -12238,6 +13769,11 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument(
         "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
     )
+    resolve.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
     resolve.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("contract")
@@ -12314,6 +13850,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
     )
+    validate.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
 
     mission_init = sub.add_parser("mission-init")
     mission_init.add_argument("--payload", required=True, type=Path)
@@ -12380,6 +13921,11 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_status.add_argument(
         "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
     )
+    coordinator_status.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
 
     portfolio_render = sub.add_parser("portfolio-render")
     portfolio_render.add_argument(
@@ -12396,6 +13942,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     portfolio_render.add_argument(
         "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    portfolio_render.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
     )
     portfolio_render.add_argument(
         "--registry", type=Path, default=DEFAULT_BINDINGS
@@ -12424,6 +13975,11 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_plan.add_argument(
         "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
     )
+    coordinator_plan.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
 
     coordinator_claim = sub.add_parser("coordinator-action-claim")
     coordinator_claim.add_argument("--action-id", required=True)
@@ -12446,6 +14002,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coordinator_claim.add_argument(
         "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    coordinator_claim.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
     )
     coordinator_claim.add_argument("--dry-run", action="store_true")
 
@@ -12508,6 +14069,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
     )
     coordinator_apply_result.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
+    coordinator_apply_result.add_argument(
         "--missions-dir", type=Path, default=DEFAULT_MISSIONS
     )
     coordinator_apply_result.add_argument(
@@ -12561,6 +14127,52 @@ def build_parser() -> argparse.ArgumentParser:
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
     frontier_audit.add_argument("--dry-run", action="store_true", default=True)
+
+    project_context_audit = sub.add_parser("project-context-audit")
+    project_context_audit.add_argument(
+        "--registry", type=Path, default=DEFAULT_BINDINGS
+    )
+    project_context_audit.add_argument(
+        "--hosts", type=Path, default=DEFAULT_HOSTS
+    )
+    project_context_audit.add_argument(
+        "--adapter", type=Path, default=DEFAULT_ADAPTER
+    )
+    project_context_audit.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    project_context_audit.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
+    project_context_audit.add_argument(
+        "--dry-run", action="store_true", default=True
+    )
+
+    project_context_apply = sub.add_parser("project-context-apply-event")
+    project_context_apply.add_argument("--event", required=True, type=Path)
+    project_context_apply.add_argument(
+        "--registry", type=Path, default=DEFAULT_BINDINGS
+    )
+    project_context_apply.add_argument(
+        "--hosts", type=Path, default=DEFAULT_HOSTS
+    )
+    project_context_apply.add_argument(
+        "--adapter", type=Path, default=DEFAULT_ADAPTER
+    )
+    project_context_apply.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    project_context_apply.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
+    project_context_apply.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    project_context_apply.add_argument("--dry-run", action="store_true")
 
     runtime_register = sub.add_parser("authorized-runtime-action-register")
     runtime_register.add_argument("--spec", type=Path, required=True)
@@ -12715,6 +14327,14 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         frontier_state=load_frontier_state(
                             args.frontier_state,
+                            (
+                                str(item.get("repository_id") or "")
+                                for item in registry.get("repositories", [])
+                                if isinstance(item, dict)
+                            ),
+                        ),
+                        project_context_state=load_project_context_state(
+                            args.project_context_state,
                             (
                                 str(item.get("repository_id") or "")
                                 for item in registry.get("repositories", [])
@@ -12953,6 +14573,14 @@ def main(argv: list[str] | None = None) -> int:
                         if isinstance(item, dict)
                     ),
                 ),
+                project_context_state=load_project_context_state(
+                    args.project_context_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                    ),
+                ),
             )
             if plan.get("next_action") and not plan.get(
                 "cycle_should_continue_now"
@@ -13006,6 +14634,82 @@ def main(argv: list[str] | None = None) -> int:
             )
             _json_stdout(result)
             return 0 if result["classification"] == "FRONTIER_AUDIT_CLEAR" else 2
+
+        if args.command == "project-context-audit":
+            registry = load_json(args.registry)
+            hosts = load_json(args.hosts)
+            adapter = load_json(args.adapter)
+            validate_registry(registry, hosts)
+            repository_ids = [
+                str(item.get("repository_id") or "")
+                for item in registry.get("repositories", [])
+                if isinstance(item, dict) and item.get("repository_id")
+            ]
+            result = audit_project_context_state(
+                registry,
+                load_project_context_state(
+                    args.project_context_state, repository_ids
+                ),
+                load_frontier_state(args.frontier_state, repository_ids),
+                collect_authority_signals(registry, hosts, adapter),
+            )
+            _json_stdout(result)
+            return (
+                0
+                if result["classification"] == "PROJECT_CONTEXT_AUDIT_CLEAR"
+                else 2
+            )
+
+        if args.command == "project-context-apply-event":
+            if not args.dry_run:
+                _authorized_cli_writer(args)
+            registry = load_json(args.registry)
+            hosts = load_json(args.hosts)
+            adapter = load_json(args.adapter)
+            validate_registry(registry, hosts)
+            repository_ids = [
+                str(item.get("repository_id") or "")
+                for item in registry.get("repositories", [])
+                if isinstance(item, dict) and item.get("repository_id")
+            ]
+            candidate = load_json(args.event)
+            signals = collect_authority_signals(registry, hosts, adapter)
+            signal = next(
+                (
+                    item
+                    for item in signals
+                    if item.get("repository_id") == candidate.get("repository_id")
+                ),
+                None,
+            )
+            frontier_state = load_frontier_state(
+                args.frontier_state, repository_ids
+            )
+            validate_project_context_event_against_observations(
+                candidate, frontier_state, signal
+            )
+            project_context_state = load_project_context_state(
+                args.project_context_state, repository_ids
+            )
+            result = apply_project_context_event(
+                project_context_state, candidate
+            )
+            if (
+                not args.dry_run
+                and result["classification"]
+                == "PROJECT_CONTEXT_EVENT_APPLIED"
+            ):
+                atomic_write_json(
+                    args.project_context_state, project_context_state
+                )
+            result["dry_run"] = bool(args.dry_run)
+            result["mutated"] = bool(
+                not args.dry_run
+                and result["classification"]
+                == "PROJECT_CONTEXT_EVENT_APPLIED"
+            )
+            _json_stdout(result)
+            return 0
 
         if args.command == "authorized-runtime-action-register":
             coordinator_state, actor_task_id = _authorized_cli_writer(args)
@@ -13128,25 +14832,46 @@ def main(argv: list[str] | None = None) -> int:
                 _authorized_cli_writer(args)
             portfolio = load_json(args.input)
             scheduler_state = load_scheduler_state(args.scheduler_state)
-            validate_portfolio_scheduler_consistency(portfolio, scheduler_state)
+            validate_portfolio_scheduler_consistency(
+                portfolio, scheduler_state
+            )
             registry = load_json(args.registry)
             hosts = load_json(args.hosts)
             adapter = load_json(args.adapter)
+            repository_ids = [
+                str(item.get("repository_id") or "")
+                for item in registry.get("repositories", [])
+                if isinstance(item, dict) and item.get("repository_id")
+            ]
             frontier_state = load_frontier_state(
                 args.frontier_state,
-                (
-                    str(item.get("repository_id") or "")
-                    for item in registry.get("repositories", [])
-                    if isinstance(item, dict)
-                ),
+                repository_ids,
             )
+            project_context_state = load_project_context_state(
+                args.project_context_state, repository_ids
+            )
+            signals = collect_authority_signals(registry, hosts, adapter)
+            portfolio = migrate_portfolio_to_project_context_v4(
+                portfolio,
+                project_context_state,
+                frontier_state,
+                signals,
+            )
+            validate_portfolio_scheduler_consistency(portfolio, scheduler_state)
             validate_portfolio_frontier_consistency(
                 portfolio,
                 frontier_state,
-                collect_authority_signals(registry, hosts, adapter),
+                signals,
+            )
+            validate_portfolio_project_context_consistency(
+                portfolio,
+                project_context_state,
+                frontier_state,
+                signals,
             )
             rendered = render_portfolio_markdown(portfolio)
             if not args.dry_run:
+                atomic_write_json(args.input, portfolio)
                 atomic_write_text(args.output, rendered)
             _json_stdout(
                 {
@@ -13158,6 +14883,10 @@ def main(argv: list[str] | None = None) -> int:
                         "semantic_fingerprint"
                     ),
                     "scheduler_revision": scheduler_state.get("revision"),
+                    "schema_version": portfolio.get("schema_version"),
+                    "project_context_revision": portfolio.get(
+                        "project_context_revision"
+                    ),
                     "active_route_count": portfolio.get("active_route_count"),
                     "dry_run": bool(args.dry_run),
                 }
@@ -13189,6 +14918,14 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 frontier_state=load_frontier_state(
                     args.frontier_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                    ),
+                ),
+                project_context_state=load_project_context_state(
+                    args.project_context_state,
                     (
                         str(item.get("repository_id") or "")
                         for item in registry.get("repositories", [])
@@ -13280,6 +15017,14 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 )
                 portfolio = load_json(args.portfolio)
+                project_context_state = load_project_context_state(
+                    args.project_context_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                    ),
+                )
                 result = apply_external_result_transaction(
                     scheduler_state,
                     frontier_state,
@@ -13288,6 +15033,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.action_id,
                     result_payload,
                     observed_authority_signal=observed_authority_signal,
+                    project_context_state=project_context_state,
                     coordinator_state=coordinator_state,
                     actor_task_id=actor_task_id,
                 )
@@ -13295,6 +15041,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = apply_external_result_transaction_files(
                     scheduler_path=args.scheduler_state,
                     frontier_path=args.frontier_state,
+                    project_context_path=args.project_context_state,
                     missions_dir=args.missions_dir,
                     portfolio_path=args.portfolio,
                     journal_dir=args.journal_dir,

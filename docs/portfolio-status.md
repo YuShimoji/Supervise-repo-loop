@@ -4,7 +4,7 @@
 
 The Coordinator maintains two projections of the same deterministic plan:
 
-- `state/coordinator-current-status.v1.json` for schema-v3 machine readback;
+- `state/coordinator-current-status.v1.json` for schema-v4 machine readback;
 - `state/coordinator-current-status.md` for the user.
 
 The filename remains stable so live links do not break. The JSON object's
@@ -25,12 +25,13 @@ that fingerprint.
 python scripts/supervise_repo_loop.py portfolio-render
 ```
 
-The command reads the live scheduler and frontier ledgers by default. It
+The command reads the live scheduler, frontier, and project-context ledgers by default. It
 validates the stop/progress fields, scheduler revision, concurrency,
 active-route count, exact structured route identities, semantic fingerprint,
-frontier revision, and every repository certificate before atomically
-rewriting only the Markdown projection. Schema v2 remains readable only for
-migration; it is not publishable as a current frontier. A stale JSON source
+frontier revision, project-context revision, and every repository certificate
+before upgrading/writing the canonical JSON and atomically rewriting the
+Markdown projection. Schemas v2/v3 remain readable only for migration; they are
+not publishable as a current project context. A stale JSON source
 fails before output is changed.
 
 The top-level `active_routes` array contains the repository, action, exact
@@ -57,12 +58,16 @@ Mission. Each row contains:
 - artifact, Worker Report, and Supervisor verdict links when available;
 - frontier status, epoch/event, disposition, source actor, branch/HEAD,
   authority fingerprint, and exact active artifact certificate;
+- project-context status/revision/event plus its north star, current bottleneck,
+  completion definition, active-lane frontier map, decisions, and evidence
+  coverage;
 - a seven-stage progress position: Mission, Work Order, Worker, Worker Report,
   Supervisor, Verdict, and Next Route;
 - a roadmap position with the overall position, current block, completed
   blocks, next blocks, next gate, and explicit project completion definition.
 
-The roadmap position uses named blocks and gates, not a guessed completion
+The roadmap position is copied from the certified `ProjectContextRecord`. It
+uses named blocks and gates, not a guessed completion
 percentage. It shows where the current slice sits in the known project process
 without implying acceptance for unfinished owner gates.
 

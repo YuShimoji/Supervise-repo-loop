@@ -8,7 +8,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
 
 ```json
 {
-  "contract_version": 8,
+  "contract_version": 9,
   "writer": {
     "mode": "single_bound_primary_task",
     "actor_identity_source": "CODEX_THREAD_ID",
@@ -50,7 +50,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
   "status": {
     "json": "state/coordinator-current-status.v1.json",
     "markdown": "state/coordinator-current-status.md",
-    "schema_version": 3,
+    "schema_version": 4,
     "scope": "all_registered_repositories",
     "update_policy": "semantic_change_only",
     "renderer": "portfolio-render",
@@ -59,7 +59,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "roadmap_position_per_repository": true,
     "status_query": "consume_observed_results_and_drain_required_handoffs_before_answer",
     "checkpoint_consistency": {
-      "source": "same_scheduler_and_frontier_revisions_and_active_route_set",
+      "source": "same_scheduler_frontier_and_project_context_revisions_and_active_route_set",
       "projection_order": "json_then_render_then_verify",
       "on_mismatch": "CHECKPOINT_FORBIDDEN"
     },
@@ -90,6 +90,29 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     "delivery_ack_is_result": false,
     "historical_review": "explicit_exact_identity_review_only_without_frontier_mutation",
     "temporary_safety_mode": "TRANSPORT_ONLY_RECONCILIATION"
+  },
+  "project_context": {
+    "ledger": "state/project-context-ledger.v1.json",
+    "envelope_schema": "supervisor-context-envelope.v1",
+    "required_for": "every_ordinary_supervisor_or_worker_action",
+    "required_contents": [
+      "north_star",
+      "roadmap",
+      "current_bottleneck",
+      "completion_definition",
+      "all_active_lane_frontiers",
+      "decisions_since_prior",
+      "evidence_manifest",
+      "omitted_evidence",
+      "retired_artifacts",
+      "authority_fingerprint"
+    ],
+    "external_result_cas": [
+      "based_on_project_context_revision",
+      "based_on_frontier_epoch"
+    ],
+    "semantic_change_only": true,
+    "temporary_safety_mode": "CONTEXT_RECONCILIATION_REQUIRED"
   },
   "input_lineage": {
     "states": [
@@ -177,6 +200,9 @@ with the prose and reject a runtime that cannot expose the required plan fields.
       "frontier_revision",
       "frontier_safety_mode",
       "frontier_gate",
+      "project_context_revision",
+      "project_context_safety_mode",
+      "project_context_gate",
       "active_routes",
       "ready_actions",
       "required_handoff_actions",
@@ -205,7 +231,8 @@ for one project is never a global scheduler lock.
 Capability gate
 - Read the installed SKILL, protocol, scheduler contract, this Prompt, and the
   persisted Coordinator plan before acting.
-- Require scheduler schema v2, frontier ledger v1, portfolio schema v3, and the
+- Require scheduler schema v2, frontier ledger v1, project-context ledger v1,
+  portfolio schema v4, and the
   plan fields named in the JSON contract.
   For this Coordinator, also require concurrency_limit=3; the generic scheduler
   may support other configured values within its declared range.
@@ -213,6 +240,9 @@ Capability gate
   MIGRATION_REQUIRED once, and route the loop-infrastructure repair before
   claiming that portfolio concurrency is active.
 - Never emulate multiple routes with unpersisted chat memory.
+- Never send ordinary work or adjudication without the exact action-bound
+  `SupervisorContextEnvelope`. Missing or stale project context admits only
+  frontier, authority, and project-context reconciliation.
 - Before any live mutation, require the process `CODEX_THREAD_ID` to equal the
   active exact `coordinator_state.coordinator_task.task_id`. Do not copy or
   pass the primary ID on behalf of another task. A repair, audit, reporting, or
@@ -354,13 +384,14 @@ Durable portfolio index
   fingerprint changes; do not use timestamps alone as change. Route-set,
   route-state, input-disposition, and next-owner changes are semantic changes
   even when project artifacts are unchanged.
-- Write JSON schema version 3 first, then generate Markdown with the
+- Write JSON schema version 4 first, then generate Markdown with the
   deterministic `portfolio-render` command. Do not hand-maintain a divergent
   table. Both files contain the same seven-stage path: Mission, Work Order,
   Worker, Worker Report, Supervisor, Verdict, Next Route.
 - Before any state-changing response or explicit status answer can checkpoint,
   verify against the scheduler and frontier files read for that response:
-  exact `scheduler_revision`, `frontier_revision`, safety mode,
+  exact `scheduler_revision`, `frontier_revision`, project-context revision,
+  both safety modes,
   FrontierCertificates, `concurrency_limit`, active-route count, and the full
   active route set (`repository_id`, `action_id`, recipient, delivery token,
   observer kind, cursor, and status). Persist that route set in `active_routes`. A missing,
@@ -470,6 +501,14 @@ At minimum prove:
     observation cannot issue a certificate or create work;
 16. interruption between result and portfolio persistence replays to one exact
     applied frontier without a split-brain user-facing projection.
+17. every ordinary Supervisor/Worker action carries a complete context envelope
+    whose repository and lane equal the exact route;
+18. a change in any other active lane invalidates the prior envelope and a late
+    result is quarantined by project-context revision compare-and-swap;
+19. portfolio schema v4 rejects a roadmap or current position from an older
+    project-context revision;
+20. four existing-project migration shapes and at least three newly registered
+    web/game/media shapes pass the same generic reducer and envelope canary.
 
 The transition map and portfolio index are projections, not additional
 schedulers. Their state and resume anchors must come from the same deterministic

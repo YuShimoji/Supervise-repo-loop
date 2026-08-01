@@ -46,8 +46,9 @@ only administrator operation.
 6. If one route has a semantic result, use
    coordinator-action-apply-result with the current independently collected
    authority signal. The write-ahead reducer must validate the exact action,
-   recipient, result, frontier epoch, Git/authority observation, and Mission
-   CAS; then update frontier, Mission, scheduler, and portfolio v3 and close
+   recipient, result, frontier epoch, project-context revision,
+   Git/authority observation, and Mission; then apply both compare-and-swap
+   gates, update frontier, Mission, scheduler, and portfolio v4, and close
    only that route. A delivery token, cursor, ACK, or non-empty evidence string
    is not a semantic result. Preserve every other recipient, delivery token,
    payload hash, and cursor unchanged.
@@ -56,8 +57,8 @@ only administrator operation.
    the resulting mandatory protocol handoff to its next external wait or
    terminal, fill safe capacity from other repositories, start at most one new
    unit of work per repository in the pass, then do one multi-target wait.
-8. Before any state-changing checkpoint, rebuild canonical portfolio JSON v3
-   from the same scheduler and frontier revisions, including the exact
+8. Before any state-changing checkpoint, rebuild canonical portfolio JSON v4
+   from the same scheduler, frontier, and project-context revisions, including the exact
    structured active route set and FrontierCertificates, then run
    `portfolio-render`. Scheduler/frontier revision, capacity, route count,
    action, recipient, token, cursor, status, authority fingerprint, artifact,

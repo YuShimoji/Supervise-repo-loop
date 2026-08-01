@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/project-context-state.v1",
+  "title": "Project-wide current-context ledger v1",
+  "type": "object",
+  "required": ["schema_version", "revision", "safety_mode", "contexts", "events", "repository_status"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "revision": {"type": "integer", "minimum": 0},
+    "safety_mode": {"enum": ["CONTEXT_RECONCILIATION_REQUIRED", "PROJECT_CONTEXT_VERIFIED"]},
+    "contexts": {"type": "object", "additionalProperties": {"$ref": "project-context-record.v1.schema.json"}},
+    "events": {"type": "array", "items": {"$ref": "project-context-record.v1.schema.json"}},
+    "repository_status": {
+      "type": "object",
+      "additionalProperties": {"enum": ["legacy_unverified", "reconciliation_required", "authority_conflict", "verified"]}
+    }
+  },
+  "additionalProperties": false
+}

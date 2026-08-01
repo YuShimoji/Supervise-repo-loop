@@ -20,6 +20,7 @@ from test_coordinator_only_ux import (  # noqa: E402
     REPO_A,
     bind_mission_to_frontier,
     certified_frontier_fixture,
+    certified_project_context_fixture,
     fixture,
     materialize_git_fixture_roots,
     mission,
@@ -79,6 +80,7 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
             "coordinator": root / "coordinator.json",
             "scheduler": root / "scheduler.json",
             "frontier": root / "frontier.json",
+            "project_context": root / "project-context.json",
             "missions": root / "missions",
         }
         paths["missions"].mkdir()
@@ -93,8 +95,11 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
             loop.atomic_write_json(paths[name], document)
         signals = loop.collect_authority_signals(registry, hosts, adapter)
         signal_by_repository = {item["repository_id"]: item for item in signals}
+        frontier = certified_frontier_fixture(registry, signals)
+        loop.atomic_write_json(paths["frontier"], frontier)
         loop.atomic_write_json(
-            paths["frontier"], certified_frontier_fixture(registry, signals)
+            paths["project_context"],
+            certified_project_context_fixture(registry, signals, frontier),
         )
         loop.atomic_write_json(
             paths["missions"] / "ready.json",
@@ -118,6 +123,8 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
             str(paths["missions"]),
             "--frontier-state",
             str(paths["frontier"]),
+            "--project-context-state",
+            str(paths["project_context"]),
         ]
         return paths, common, coordinator
 
@@ -566,6 +573,33 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
             self.assertIn("READ_ONLY_NON_COORDINATOR_TASK", stderr.getvalue())
             self.assertEqual(paths["registry"].read_bytes(), registry_before)
             self.assertEqual(paths["hosts"].read_bytes(), hosts_before)
+
+    def test_T150_secondary_cannot_apply_project_context_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths, _, _ = self._files(root)
+            context_path = root / "project-context-write.json"
+            with mock.patch.dict(
+                os.environ, {"CODEX_THREAD_ID": SECONDARY}
+            ):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(
+                        loop.main(
+                            [
+                                "project-context-apply-event",
+                                "--event",
+                                str(root / "missing-event.json"),
+                                "--coordinator-state",
+                                str(paths["coordinator"]),
+                                "--project-context-state",
+                                str(context_path),
+                            ]
+                        ),
+                        2,
+                    )
+            self.assertIn("READ_ONLY_NON_COORDINATOR_TASK", stderr.getvalue())
+            self.assertFalse(context_path.exists())
 
 
 if __name__ == "__main__":

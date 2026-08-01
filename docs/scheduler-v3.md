@@ -22,6 +22,11 @@ frontier reconciliation continue, but the scheduler does not admit ordinary
 Mission work, generic successors, review presentation, or portfolio promotion.
 See [frontier-reconciliation.md](frontier-reconciliation.md).
 
+A fifth gate certifies the whole-project current position above the lane
+frontier. Every ordinary external action binds a
+`SupervisorContextEnvelope`; a missing or stale context admits only
+reconciliation. See [project-context-frontier.md](project-context-frontier.md).
+
 `AVAILABLE` does not mean work is in flight. `READY` means a deterministic
 action exists but has not been claimed; only `DRAINING` means the Coordinator
 has begun an exact action or is waiting on an exact route. `IDLE` is a quiet
@@ -63,7 +68,7 @@ change.
 Transport acknowledgement is not completion. External routes retain the
 action through `delivery_acknowledged` and close only after the exact result is
 parsed, validated against its frontier epoch, applied to the Mission/frontier
-reducer, and projected to portfolio v3 as `result_applied`.
+reducer, and projected to portfolio v4 as `result_applied`.
 
 ## Single-writer boundary
 
@@ -161,7 +166,7 @@ ready action
 → exact send receipt / wait cursor
 → repository route lease + scheduler release
 → optional delivery acknowledgement (transport only)
-→ exact semantic result validation + frontier compare-and-swap
+→ exact semantic result validation + project-context and frontier compare-and-swap
 → atomic result_applied transition closes that exact lease
 ```
 

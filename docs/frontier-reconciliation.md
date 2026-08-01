@@ -9,6 +9,10 @@ certificate binds the artifact identity, frontier epoch/event, branch and
 HEAD observation, disposition, source actor, and the complete authority-signal
 fingerprint.
 
+This lane-level guarantee is necessary but not sufficient. The project-wide
+north star, roadmap, cross-lane decisions, and evidence coverage are certified
+separately by [project-context-frontier.md](project-context-frontier.md).
+
 The authoritative state is `frontier-ledger.v1.json`; chat recency, filenames,
 Mission timestamps, and delivery acknowledgements are not frontier evidence.
 The repository copy is static source only. The installed skill owns the only
@@ -78,9 +82,11 @@ An arriving result may prove delivery and move directly from `dispatched` to
 
 The result binds the exact action, recipient thread, turn, message, result ID,
 repository/lane, disposition, based-on frontier epoch, FrontierRecord,
-authority high-water signal, and before/after Mission state. The application
+authority high-water signal, before/after Mission state, and—when the action is
+ordinary—the exact Supervisor context envelope and based-on project-context
+revision. The application
 transaction validates all identities, applies the frontier CAS, replaces the
-exact Mission, completes the scheduler route, and regenerates portfolio v3.
+exact Mission, completes the scheduler route, and regenerates portfolio v4.
 Only then is the action `result_applied`.
 Failed and stale results close their route as a terminal non-applied action,
 remain in the failure/quarantine ledger, and regenerate the portfolio without

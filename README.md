@@ -50,6 +50,17 @@ The audit reports legacy-unverified or stale artifact frontiers without
 writing live state. See
 [frontier-reconciliation.md](docs/frontier-reconciliation.md).
 
+Read-only project-context audit:
+
+```powershell
+python scripts/supervise_repo_loop.py project-context-audit --dry-run
+```
+
+This second gate verifies the project north star, roadmap position, all active
+lane frontiers, decisions, and evidence coverage before any ordinary
+Supervisor/Worker route. See
+[project-context-frontier.md](docs/project-context-frontier.md).
+
 ## Preview or install static changes
 
 ```powershell

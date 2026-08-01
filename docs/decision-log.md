@@ -242,3 +242,20 @@
   the next ordinary Mission, user review card, generic successor, or current
   portfolio artifact. Missing certificates activate
   `TRANSPORT_ONLY_RECONCILIATION` rather than guessing current state.
+
+## D-022 — Bind every ordinary route to the whole-project current context
+
+- Date: 2026-08-02
+- Corrects: Supervisor tunnel vision, lane-local success being mistaken for
+  project-wide current position, and stale roadmap/evidence summaries surviving
+  after another lane advances.
+- Decision: maintain one append-only `ProjectContextRecord` per repository;
+  require exact current authority and every active lane frontier; bind the full
+  project context into every ordinary Supervisor/Worker action; compare-and-swap
+  both project-context revision and artifact-frontier epoch on result; project
+  the same record into portfolio schema v4. New and legacy registrations start
+  `legacy_unverified` without inferred context.
+- Effect: project names and media/game/web domain rules remain outside the
+  runtime. An old or narrowed view can be audited or reconciled but cannot
+  dispatch work, adjudicate current state, or appear as the current portfolio
+  roadmap.

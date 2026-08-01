@@ -8,7 +8,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
 
 ```json
 {
-  "contract_version": 4,
+  "contract_version": 5,
   "scheduler": {
     "claim_model": "scheduler_claim_plus_route_leases",
     "configured_external_route_capacity": 3,
@@ -27,7 +27,9 @@ with the prose and reject a runtime that cannot expose the required plan fields.
     }
   },
   "wait": {
-    "mode": "multi_target_first_event",
+    "mode": "transport_aware_observation",
+    "codex_worker_observer": "wait_threads",
+    "chatgpt_supervisor_observer": "read_thread_once_per_pass",
     "foreground_wait_budget_seconds": 60,
     "unchanged_timeout": "silent_checkpoint",
     "commentary_is_event": false
@@ -107,6 +109,7 @@ with the prose and reject a runtime that cannot expose the required plan fields.
       "required_handoff_actions",
       "protocol_handoff_required",
       "wait_targets",
+      "poll_targets",
       "capacity_remaining",
       "round_robin_cursor_repository_id",
       "checkpoint_after_wait_allowed",
@@ -181,12 +184,18 @@ Portfolio scheduling pass
 - A changed BLOCKED recovery observation creates one bounded action. An
   unchanged blocker never retries. A complete lane creates at most one
   successor request for the exact completed frontier and authority revision.
+- An adopted runtime-repair disposition is not a blocker observation and not
+  an ordinary successor. Register its evidence-bound, allowlisted recovery
+  action and drain its local-effect, restricted-probe, and receipt phases.
+  Never leave an adopted action as prose-only `SYSTEM_BLOCKED` state.
 
 Waiting and turn budget
-- After filling available route capacity, wait once on all exact route targets
-  together, using their current host IDs and cursors. Process the first target
-  that completes or needs attention, persist only that route's result, then
-  recompute the portfolio plan.
+- Observe every route with the transport recorded in the plan. Poll each
+  ChatGPT Supervisor in `poll_targets` once with `read_thread`; never pass a
+  ChatGPT chat ID to `wait_threads`. Then wait once on the Codex Worker tasks in
+  `wait_targets`, using current host IDs and cursors. Process the first
+  semantic result, persist only that route's result, then recompute the plan.
+  A Supervisor result found by the initial poll is consumed before waiting.
 - Do not repeatedly wait on one exact task while unrelated capacity or READY
   work exists. Do not treat commentary, an active flag, or an unchanged
   snapshot as a result event.
@@ -207,12 +216,15 @@ Waiting and turn budget
   status answer with `next: send Worker Report to Supervisor` when that report
   has already been observed and the exact Supervisor route can be claimed.
 - A sent route with `after_cursor=null` is not checkpoint-safe. Take one
-  immediate snapshot of that exact recipient, record its returned cursor on
-  the existing lease without changing token or payload hash, and recompute.
+  transport-appropriate immediate snapshot of that exact recipient, record its
+  returned cursor on the existing lease without changing token or payload
+  hash, and recompute.
   `route_cursor_complete=false` or `missing_route_cursor` forbids checkpoint.
 - A recovery wake inspects only the persisted exact wait set. It processes a
-  semantic result once or yields silently when unchanged. Pause recovery as
-  soon as no external route lease remains. Never run a periodic idle model wake.
+  semantic result once or yields silently when unchanged. Pause recovery only
+  when the rebuilt plan reports `watchdog_should_be_armed=false`; a
+  recovery-owned typed runtime phase may require the lease even with no
+  external route. Never run a periodic idle model wake.
 - If READY remains because of a real turn or safety ceiling, persist an owned
   continuation containing action ID, repository, owner, deadline, and wake
   event. Ownerless READY is invalid.
@@ -231,7 +243,7 @@ Durable portfolio index
   verify against the scheduler file read for that response: exact
   `scheduler_revision`, `concurrency_limit`, active-route count, and the full
   active route set (`repository_id`, `action_id`, recipient, delivery token,
-  cursor, and status). Persist that route set in `active_routes`. A missing,
+  observer kind, cursor, and status). Persist that route set in `active_routes`. A missing,
   stale, duplicate, or extra identity is `portfolio_scheduler_mismatch` and
   forbids the checkpoint; regenerate JSON, render Markdown, and verify again.
   JSON and Markdown are each atomically replaced, but no cross-file atomic
@@ -292,6 +304,9 @@ Safety and authority
   state. Do not repair an ambiguous binding or route by title similarity.
 - Do not infer commit, push, PR, merge, release, publication, deployment,
   access, rights, production, or human-acceptance authority.
+- Runtime mutation requires a typed allowlisted handler, exact Supervisor
+  evidence hash, one-shot authority ledger, pre-effect receipt preparation,
+  and receipt-backed completion. Arbitrary commands and paths are forbidden.
 - A delivery remains at-least-once with idempotent recipient processing. Never
   claim transactional exactly-once transport.
 ```

@@ -44,6 +44,7 @@
         "repository_id",
         "action_id",
         "recipient_thread_id",
+        "observer_kind",
         "delivery_token",
         "after_cursor",
         "status"
@@ -52,6 +53,7 @@
         "repository_id": {"type": "string", "minLength": 1},
         "action_id": {"type": "string", "minLength": 1},
         "recipient_thread_id": {"type": "string", "minLength": 1},
+        "observer_kind": {"enum": ["codex_wait", "chatgpt_poll"]},
         "delivery_token": {"type": "string", "minLength": 1},
         "after_cursor": {
           "anyOf": [

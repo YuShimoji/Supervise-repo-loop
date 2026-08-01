@@ -8,21 +8,28 @@ It is not an idle scheduler.
 
 Operate the installed supervise-repo-loop recovery path. Require scheduler
 schema v2. This wake exists only because the previous foreground pass ended
-with a durable prepared delivery or repository route lease.
+with a durable prepared delivery, repository route lease, or a recovery-owned
+typed runtime phase.
 
 1. Run the deterministic coordinator-plan once.
-2. If there is no prepared scheduler delivery and active_routes is empty,
+2. Use plan.watchdog_should_be_armed as the only arm gate. If it is false,
    pause this automation immediately and return DONT_NOTIFY. Do not inspect
    repositories, present cards, probe blockers, request successors, or claim
-   ordinary READY work.
+   ordinary READY work. An empty active_routes array does not permit a pause
+   while an authorized runtime ledger is in EFFECT_INTENT, EFFECT_PREPARED,
+   REPAIR_PREPARED, ROLLBACK_REQUIRED, or RESULT_READY.
 3. If a prepared delivery exists, read only its exact recipient for its
    delivery token. Record the existing send when present; otherwise resend only
    the identical envelope and payload. Never release or regenerate its identity.
-4. Build one wait_threads request from plan.wait_targets, deduplicated by exact
-   host, task, and cursor. Use one immediate or bounded snapshot and process
-   only the first target that completes or needs attention. If an existing
-   route has no cursor, use that immediate snapshot to attach the returned
-   cursor to the same token/hash lease before any checkpoint.
+4. Observe routes with their persisted transport. Poll every ChatGPT
+   Supervisor in plan.poll_targets exactly once with read_thread; never pass a
+   ChatGPT chat ID to wait_threads. Build one wait_threads request only from
+   the Codex Worker entries in plan.wait_targets, deduplicated by exact host,
+   task, and cursor. Consume a semantic Supervisor result before waiting;
+   otherwise use one immediate or bounded Worker snapshot and process only the
+   first target that completes or needs attention. If an existing route has no
+   cursor, use the matching transport observer to attach the returned cursor
+   to the same token/hash lease before any checkpoint.
 5. If every target is unchanged, persist no semantic state, emit no status or
    progress message, keep only the existing route leases, and return
    DONT_NOTIFY. Do not loop inside this wake.
@@ -38,8 +45,14 @@ with a durable prepared delivery or repository route lease.
    the same scheduler revision, including the exact structured active route
    set, then run `portfolio-render`. Revision, capacity, route count, action,
    recipient, token, cursor, or status mismatch forbids the checkpoint.
-9. Pause this automation as soon as no prepared delivery or active route lease
-   remains. Never leave an idle periodic model wake active.
+9. Pause this automation as soon as a rebuilt plan reports
+   watchdog_should_be_armed=false. Never leave an idle periodic model wake
+   active.
+10. A typed runtime ledger is recovery-owned from EFFECT_INTENT until COMPLETE.
+    Resume only its exact effect ledger and allowlisted handler; require its
+    receipt before completion and never release or replace it with an ordinary
+    local action. AUTHORIZED alone is still releasable and does not arm a
+    periodic wake because no effect intent has been persisted.
 
 This lease never owns an independent status calculation. The primary Prompt
 owns the canonical portfolio index and user-facing semantic transition output.

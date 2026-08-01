@@ -113,6 +113,89 @@ def claim_prepare_send(
 
 
 class SchedulerRouteLeaseV2Tests(unittest.TestCase):
+    def test_T117_early_v2_observer_is_backfilled_without_route_identity_change(
+        self,
+    ) -> None:
+        registry, hosts, adapter, coordinator = fixture()
+        running = mission(REPO_A, "WORK_ORDER_RECEIVED", mission_id="observer-backfill")
+        scheduler = loop.default_scheduler_state()
+        plan = loop.build_coordinator_plan(
+            registry, hosts, adapter, [running], coordinator, scheduler
+        )
+        sent = claim_prepare_send(
+            scheduler, plan, digest_character="e", cursor="observer-cursor"
+        )
+        before = copy.deepcopy(scheduler["route_leases"][0])
+        del scheduler["route_leases"][0]["observer_kind"]
+        migrated = loop.migrate_scheduler_state(scheduler)
+        lease = migrated["route_leases"][0]
+        self.assertEqual(lease["observer_kind"], "codex_wait")
+        for field in (
+            "action_id",
+            "delivery_token",
+            "packet_sha256",
+            "after_cursor",
+            "status",
+        ):
+            self.assertEqual(lease[field], before[field])
+        waiting = loop.build_coordinator_plan(
+            registry, hosts, adapter, [running], coordinator, migrated
+        )
+        self.assertEqual(waiting["wait_targets"][0]["action_id"], sent["action_id"])
+        self.assertEqual(waiting["wait_targets"][0]["host_id"], "local")
+        self.assertEqual(waiting["poll_targets"], [])
+
+    def test_T118_observer_mismatch_and_unknown_legacy_transport_fail_closed(
+        self,
+    ) -> None:
+        registry, hosts, adapter, coordinator = fixture()
+        running = mission(REPO_A, "WORK_ORDER_RECEIVED", mission_id="observer-mismatch")
+        scheduler = loop.default_scheduler_state()
+        plan = loop.build_coordinator_plan(
+            registry, hosts, adapter, [running], coordinator, scheduler
+        )
+        claim_prepare_send(
+            scheduler, plan, digest_character="f", cursor="observer-cursor"
+        )
+        scheduler["route_leases"][0]["observer_kind"] = "chatgpt_poll"
+        with self.assertRaisesRegex(loop.ProtocolError, "exact adapter recipient"):
+            loop.build_coordinator_plan(
+                registry, hosts, adapter, [running], coordinator, scheduler
+            )
+
+        unknown = copy.deepcopy(scheduler)
+        unknown["route_leases"][0].pop("observer_kind", None)
+        unknown["route_leases"][0]["action"]["kind"] = "unknown_external"
+        unknown["route_leases"][0]["action"]["payload"]["route"].pop(
+            "recipient_kind", None
+        )
+        unknown["route_leases"][0]["action"]["payload"]["route"].pop(
+            "observer_kind", None
+        )
+        with self.assertRaisesRegex(loop.ProtocolError, "observer_kind"):
+            loop.migrate_scheduler_state(unknown)
+
+        legacy_mission = mission(
+            REPO_A, "WORKER_DISPATCHED", mission_id="legacy-transport-mismatch"
+        )
+        mismatched_adapter = copy.deepcopy(adapter)
+        worker_adapter = next(
+            item
+            for item in mismatched_adapter["threads"]
+            if item.get("id") == legacy_mission["worker_task_id"]
+        )
+        worker_adapter["kind"] = "chatgpt"
+        worker_adapter.pop("host_id", None)
+        with self.assertRaisesRegex(loop.ProtocolError, "Mission recipient role"):
+            loop.build_coordinator_plan(
+                registry,
+                hosts,
+                mismatched_adapter,
+                [legacy_mission],
+                coordinator,
+                loop.default_scheduler_state(),
+            )
+
     def test_T73_v1_waiting_claim_migrates_to_one_lease_without_resend(
         self,
     ) -> None:

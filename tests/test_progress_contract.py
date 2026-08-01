@@ -85,6 +85,8 @@ def active_route_record(
             "route": {
                 "repository_id": repository_id,
                 "recipient_thread_id": recipient_thread_id,
+                "recipient_kind": "supervisor",
+                "observer_kind": "chatgpt_poll",
             },
         },
     }
@@ -102,6 +104,7 @@ def active_route_record(
         "status": status,
         "repository_id": repository_id,
         "route_class": route_class,
+        "observer_kind": "chatgpt_poll",
         "recipient_thread_id": recipient_thread_id,
         "packet_sha256": packet_sha256,
         "delivery_token": delivery_token,
@@ -167,7 +170,8 @@ def scheduler_and_portfolio_with_active_routes() -> tuple[dict, dict]:
                 "owner": "exact Supervisor",
                 "route_owner": (
                     f"Coordinator route lease {waiting['action_id']} -> exact "
-                    f"Supervisor {waiting['recipient_thread_id']}"
+                    f"Supervisor {waiting['recipient_thread_id']} via "
+                    f"{waiting['observer_kind']}"
                 ),
                 "next_move": "Consume the exact result.",
             },
@@ -183,7 +187,8 @@ def scheduler_and_portfolio_with_active_routes() -> tuple[dict, dict]:
                 "owner": "exact Supervisor",
                 "route_owner": (
                     f"Prepared route {prepared['action_id']} -> exact Supervisor "
-                    f"{prepared['recipient_thread_id']}"
+                    f"{prepared['recipient_thread_id']} via "
+                    f"{prepared['observer_kind']}"
                 ),
                 "next_move": "Reconcile the prepared delivery token.",
             },
@@ -720,6 +725,31 @@ class ProgressAndStopContractTests(unittest.TestCase):
             r"recipient_thread_id",
         ):
             loop.validate_portfolio_scheduler_consistency(portfolio, scheduler)
+
+    def test_T107_portfolio_route_observer_identity_is_exact(self) -> None:
+        scheduler, portfolio = scheduler_and_portfolio_with_active_routes()
+        missing = copy.deepcopy(portfolio)
+        del missing["active_routes"][0]["observer_kind"]
+        with self.assertRaisesRegex(loop.ProtocolError, "requires observer_kind"):
+            loop.validate_portfolio_scheduler_consistency(missing, scheduler)
+
+        wrong = copy.deepcopy(portfolio)
+        wrong["active_routes"][0]["observer_kind"] = "codex_wait"
+        with self.assertRaisesRegex(
+            loop.ProtocolError,
+            r"active_routes does not exactly match scheduler routes: .*mismatched",
+        ):
+            loop.validate_portfolio_scheduler_consistency(wrong, scheduler)
+
+        hidden = copy.deepcopy(portfolio)
+        hidden["repositories"][0]["route_owner"] = hidden["repositories"][0][
+            "route_owner"
+        ].replace(" via chatgpt_poll", "")
+        with self.assertRaisesRegex(
+            loop.ProtocolError,
+            r"route_owner.*observer_kind",
+        ):
+            loop.validate_portfolio_scheduler_consistency(hidden, scheduler)
 
     def test_T106_portfolio_render_cli_fails_before_writing_stale_snapshot(
         self,

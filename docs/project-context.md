@@ -29,6 +29,15 @@ unsent until the next recovery wake. Protocol completion now drains separately
 from the per-project new-work budget. The same sub-slice adds deterministic
 seven-stage graphical status and evidence-bound v2 stop contracts.
 
+A later live audit exposed two additional must-fix gaps. First, an ADOPTED
+NLMYTGen runtime-repair disposition had no claimable scheduler representation,
+so the project remained blocked after all required authority was present.
+Second, ChatGPT Supervisor chats were incorrectly projected into the same
+`wait_threads` set as Codex Workers, although that observer supports Codex
+tasks only; an already-completed FastFictionFactory disposition therefore
+remained leased. The current sub-slice adds typed one-shot runtime effects and
+transport-aware `poll_targets`/`wait_targets`.
+
 ## Final deliverable image
 
 The Coordinator always shows one actionable user card, continues safe READY
@@ -62,7 +71,7 @@ require behavior-level verification, not Prompt phrase checks.
   The current source adds compare-and-swap blocker-contract revision with
   exact Supervisor-evidence binding, Mission-file locking, durable bidirectional
   history, conflict rejection, and file-level replay idempotency so later
-  evidence cannot diverge from scheduler state. All 107 regression tests pass
+  evidence cannot diverge from scheduler state. All 128 regression tests pass
   in both source and installed copies after the 2026-08-01 static
   synchronization.
 - Live migration verified: the two legacy BLOCKED records now carry
@@ -79,11 +88,18 @@ require behavior-level verification, not Prompt phrase checks.
   the installed consistency gate accepted all three structured route records.
   The immutable point-in-time identities are recorded in
   [live-route-isolation-rev118-to-rev122.md](evidence/live-route-isolation-rev118-to-rev122.md).
+- Live status-boundary handoff evidence: both the FastFictionFactory and
+  Residual Atlas Worker Reports were consumed and sent to their distinct
+  Supervisors before the revision-135 checkpoint. The plan kept both exact
+  delivery identities and classified the regular ChatGPT recipients as
+  `chatgpt_poll`; neither was passed to the Codex-only wait API. Both verdicts
+  arrived independently. See
+  [runtime-recovery-and-route-observer-gap-20260801.md](evidence/runtime-recovery-and-route-observer-gap-20260801.md).
 - Intentionally inactive while idle: recovery automation.
-- Still required before claiming live completion: completion of one project
-  while another remains deliberately delayed, a status-request canary where an
-  already-arrived Worker Report is sent to its Supervisor before answering, and
-  one interrupted multi-route recovery canary. The route-admission,
-  replacement, and durable portfolio/input-projection portions are now proven.
+- Still required before claiming complete live acceptance: execution and
+  exact receipt adjudication of the newly typed NLMYTGen runtime recovery, plus
+  one deliberately interrupted typed-recovery canary. The independent project
+  completion, status-request handoff, route-admission, replacement, and durable
+  portfolio/input-projection portions are now proven.
 - Optional later hardening: an external distributed transaction journal if
   writers on multiple hosts or non-lock-preserving storage are ever authorized.

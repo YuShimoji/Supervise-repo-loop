@@ -1629,7 +1629,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
             "the Coordinator prompt must have one unambiguous JSON contract",
         )
         contract = json.loads(encoded_contracts[0])
-        self.assertEqual(contract["contract_version"], 4)
+        self.assertEqual(contract["contract_version"], 5)
 
         self.assertEqual(
             contract["scheduler"],
@@ -1654,7 +1654,9 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
         self.assertEqual(
             contract["wait"],
             {
-                "mode": "multi_target_first_event",
+                "mode": "transport_aware_observation",
+                "codex_worker_observer": "wait_threads",
+                "chatgpt_supervisor_observer": "read_thread_once_per_pass",
                 "foreground_wait_budget_seconds": 60,
                 "unchanged_timeout": "silent_checkpoint",
                 "commentary_is_event": False,
@@ -1753,6 +1755,7 @@ class CoordinatorOnlyUxTests(unittest.TestCase):
                     "required_handoff_actions",
                     "protocol_handoff_required",
                     "wait_targets",
+                    "poll_targets",
                     "capacity_remaining",
                     "round_robin_cursor_repository_id",
                     "checkpoint_after_wait_allowed",

@@ -72,8 +72,9 @@ Mission packets contain only deltas.
   checkpoint, not Coordinator completion.
 - `coordinator-status`, generic next-action resolution, and recovery use the
   same scheduler plan and action ID.
-- A normal status/list/why-stopped request first inspects each exact wait target
-  once. An already-arrived result is consumed and its mandatory protocol
+- A normal status/list/why-stopped request first inspects each exact route once
+  with its persisted observer: `read_thread` for a ChatGPT Supervisor and
+  `wait_threads` only for Codex Workers. An already-arrived result is consumed and its mandatory protocol
   handoff drains to the next external wait or terminal before the answer. A
   status request is not an implicit read-only freeze.
 - Claim an action before presentation, mutation, or send. Keep the scheduler
@@ -89,9 +90,11 @@ Mission packets contain only deltas.
   delivery by reading that recipient for the token before an identical resend.
   Transport is at-least-once with idempotent processing; do not claim
   transactional exactly-once delivery.
-- Wait once for at most 60 seconds on the complete exact route set and consume
-  the first semantic result. An unchanged timeout is not a result event and
-  must not produce another progress message or task reread.
+- Poll each exact ChatGPT Supervisor route once, then wait once for at most 60
+  seconds on the Codex Worker route set and consume the first semantic result.
+  A ChatGPT chat ID is never a `wait_threads` target. An unchanged timeout is
+  not a result event and must not produce another progress message or task
+  reread.
 - The recovery heartbeat remains paused while idle and while the primary
   foreground wait is active. Arm it only after a foreground checkpoint leaves
   persisted external route leases, and pause it after the route set drains.
@@ -148,6 +151,13 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
   lock. Historical replay is a no-op; competing revisions from one predecessor
   cannot both succeed. Status and scheduler both read that same current Mission
   contract.
+- An `ADOPTED` runtime-repair disposition is converted to a typed scheduler
+  action bound to that exact evidence SHA-256, authority ID, Mission identity,
+  handler, target identity, Worker, and Supervisor. Only allowlisted handlers
+  may execute. A prepared local effect is non-releasable and requires a durable
+  receipt; precondition mismatch performs no target mutation and leaves the
+  authority unconsumed. See
+  [authorized-runtime-recovery.md](../docs/authorized-runtime-recovery.md).
 
 ## Progress presentation
 
@@ -155,7 +165,7 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
   rewritten, into the Markdown index.
 - It records the exact scheduler revision and structured active route set used
   to build the response. Revision, concurrency, route count, repository,
-  action, recipient, token, cursor, or route-status mismatch forbids a
+  action, recipient, observer kind, token, cursor, or route-status mismatch forbids a
   checkpoint until JSON is regenerated and Markdown is rendered and verified.
 - Every state-changing or explicit status response embeds the same compact
   Mermaid path: Mission -> Work Order -> Worker -> Worker Report -> Supervisor

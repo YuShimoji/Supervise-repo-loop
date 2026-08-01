@@ -184,3 +184,28 @@
 - Effect: stale or conflicting updates fail closed, idempotent replay is safe,
   and the scheduler, graphical status, and recovery gate always read the same
   current blocker rather than divergent hand-maintained summaries.
+
+## D-018 — Observe routes with their actual transport
+
+- Date: 2026-08-01
+- Corrects: D-013's single undifferentiated multi-target wait.
+- Decision: persist the recipient observer on every route. Poll exact ChatGPT
+  Supervisor chats once per pass with `read_thread`; include only persistent
+  Codex Worker tasks in `wait_threads`. Preserve both classes in the active
+  route set and recovery lease.
+- Effect: a completed Supervisor result cannot remain hidden because its chat
+  ID was sent to an unsupported Codex-task wait API, while Worker waits retain
+  bounded first-event behavior.
+
+## D-019 — Adopted runtime repair becomes a typed action
+
+- Date: 2026-08-01
+- Decision: an exact Supervisor `ADOPTED` disposition for runtime maintenance
+  must create a durable, claimable, evidence-bound recovery action. Execute
+  only a fixed allowlisted handler, persist a one-shot effect ledger before
+  target mutation, require a receipt, route restricted probes to the exact
+  Worker, roll back only under the authorized rule, and return the result to
+  the exact Supervisor.
+- Effect: “authorization satisfied” can no longer coexist indefinitely with
+  zero scheduler actions. Arbitrary shell repair remains forbidden, crash
+  recovery is idempotent, and unrelated project routes remain independent.

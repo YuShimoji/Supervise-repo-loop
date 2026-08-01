@@ -17,7 +17,9 @@ starting, resuming, or changing the one user-facing Coordinator task. Read
 [portfolio-status.md](docs/portfolio-status.md) before writing or presenting
 the durable all-project status or user-input lineage. Use
 [recovery-lease-prompt.md](references/recovery-lease-prompt.md) as the exact
-attached heartbeat contract.
+attached heartbeat contract. Read
+[authorized-runtime-recovery.md](docs/authorized-runtime-recovery.md) before
+turning an adopted runtime-repair disposition into an effectful action.
 
 Use `scripts/supervise_repo_loop.py --help` for deterministic resolution,
 queueing, binding, migration, state, idempotency, response routing, and
@@ -216,7 +218,9 @@ paused recovery lease:
    action to a repository-scoped route lease and release the scheduler claim;
 5. continue claiming other repositories while capacity remains, up to three
    external routes and one execution route per repository;
-6. wait once, for at most 60 seconds, on all exact route targets and cursors;
+6. poll each exact ChatGPT Supervisor route once, then wait once for at most 60
+   seconds on only the exact Codex Worker targets and cursors; never pass a
+   ChatGPT chat ID to `wait_threads`;
 7. consume the first semantic result, complete only its route lease, persist the
    transition, and recompute the plan; drain the mandatory protocol handoff to
    its next external wait or terminal before checkpoint;
@@ -229,6 +233,10 @@ suppress unchanged cards, blockers, authority revisions, and successor
 requests. A `BLOCKED` frontier never authorizes a generic successor; a changed
 recovery signal creates one bounded recovery action. A `COMPLETE` lane frontier
 permits one Supervisor successor request when repository policy allows it.
+An ADOPTED exact runtime-repair disposition creates a typed, evidence-bound
+runtime action; it must not remain an unclaimable sentence in the status row.
+Only allowlisted handlers may mutate runtime state, and local-effect completion
+requires its durable receipt.
 `protocol_handoff_required`, `missing_route_cursor`, or a claimable required
 handoff forbids checkpoint. Suppress duplicate ready execution projections for
 an exact Mission attempt that already owns an execution lease.

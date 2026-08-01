@@ -31,9 +31,11 @@ the exact structured route identities before atomically rewriting only the
 Markdown projection. A stale JSON source fails before output is changed.
 
 The top-level `active_routes` array contains the repository, action, exact
-recipient, delivery token, cursor, and status for every prepared or external
-route. Its order is presentational; its identity set must exactly equal the
-scheduler's capacity-reserving route set.
+recipient, recipient transport/observer, delivery token, cursor, and status for
+every prepared or external route. Its order is presentational; its identity set
+must exactly equal the scheduler's capacity-reserving route set. Codex Worker
+routes use `wait_threads`; ChatGPT Supervisor routes use one bounded
+`read_thread` poll per pass and must never be silently omitted from observation.
 
 ## Repository rows
 
@@ -85,6 +87,12 @@ Mission frontier.
 A legacy BLOCKED frontier without that contract is not silently summarized. It
 produces one `repair_blocker_contract` action that may only reconstruct facts
 from the persisted Worker Report and Supervisor verdict.
+
+When an exact Supervisor disposition adopts a bounded runtime repair, the row
+links its typed runtime action and shows its current effect/probe/receipt phase.
+The adopted action is no longer described as waiting for an unspecified
+environment change. See
+[authorized-runtime-recovery.md](authorized-runtime-recovery.md).
 
 A later exact Supervisor verdict can narrow a complete contract. The new
 contract must carry `supersedes_contract_fingerprint` for the current Mission

@@ -12,6 +12,7 @@
     "active_repository_selector",
     "pending_repository_ids",
     "pending_user_responses",
+    "authorized_runtime_actions",
     "coordinator_task"
   ],
   "properties": {
@@ -114,6 +115,10 @@
         "type": "object"
       }
     },
+    "authorized_runtime_actions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/authorizedRuntimeAction"}
+    },
     "active_user_card_id": {
       "type": ["string", "null"]
     },
@@ -123,7 +128,7 @@
         "all_terminal_stops_coordinator": {"const": false},
         "automation_idle_policy": {"const": "paused"},
         "automation_arm_condition": {
-          "const": "external_active_claim_or_exact_outbound_wait"
+          "const": "external_route_or_recovery_owned_runtime_phase"
         },
         "cycle_mode": {"const": "event_driven_drain"},
         "checkpoint_with_inflight": {"const": false},
@@ -177,5 +182,175 @@
       "additionalProperties": true
     }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "effectReceipt": {
+      "type": "object",
+      "required": [
+        "path",
+        "identity_sha256",
+        "phase",
+        "authority_consumed",
+        "target_pre_sha256",
+        "updated_at"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "identity_sha256": {"$ref": "#/$defs/sha256"},
+        "phase": {"type": "string", "minLength": 1},
+        "authority_consumed": {"type": "boolean"},
+        "target_pre_sha256": {"$ref": "#/$defs/sha256"},
+        "target_post_sha256": {"$ref": "#/$defs/sha256"},
+        "updated_at": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "authorizedRuntimeAction": {
+      "type": "object",
+      "required": [
+        "runtime_action_id",
+        "repository_id",
+        "mission_id",
+        "attempt_id",
+        "supervision_lane",
+        "supervisor_thread_id",
+        "worker_task_id",
+        "worker_host_id",
+        "worker_adapter_host_id",
+        "handler_id",
+        "handler_version",
+        "repair_execution_surface",
+        "probe_execution_surface",
+        "authorization_id",
+        "authorization_action_id",
+        "decision_evidence_path",
+        "decision_evidence_sha256",
+        "decision_event_id",
+        "supervisor_text_path",
+        "supervisor_text_sha256",
+        "authorization_payload_sha256",
+        "target_path",
+        "target_pre_sha256",
+        "target_pre_size",
+        "backup_path",
+        "quarantine_path",
+        "repository_root",
+        "recovery_receipt_path",
+        "identity_sha256",
+        "phase",
+        "authority_consumed",
+        "registered_at"
+      ],
+      "properties": {
+        "runtime_action_id": {"type": "string", "minLength": 1},
+        "repository_id": {"type": "string", "minLength": 1},
+        "mission_id": {"type": "string", "minLength": 1},
+        "attempt_id": {"type": "string", "minLength": 1},
+        "supervision_lane": {"type": "string", "minLength": 1},
+        "supervisor_thread_id": {"type": "string", "minLength": 1},
+        "worker_task_id": {"type": "string", "minLength": 1},
+        "worker_host_id": {"type": "string", "minLength": 1},
+        "worker_adapter_host_id": {"type": "string", "minLength": 1},
+        "handler_id": {"const": "codex_windows_deny_read_acl_state_v1"},
+        "handler_version": {"const": 1},
+        "repair_execution_surface": {"const": "runtime_owner_maintenance"},
+        "probe_execution_surface": {"const": "restricted_workspace_write"},
+        "authorization_id": {"type": "string", "minLength": 1},
+        "authorization_action_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "decision_evidence_path": {"type": "string", "minLength": 1},
+        "decision_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "decision_event_id": {"type": "string", "minLength": 1},
+        "supervisor_text_path": {"type": "string", "minLength": 1},
+        "supervisor_text_sha256": {"$ref": "#/$defs/sha256"},
+        "authorization_payload_sha256": {"$ref": "#/$defs/sha256"},
+        "target_path": {"type": "string", "minLength": 1},
+        "target_pre_sha256": {"const": "6a4875ddaceaa91fb3369f0f6d962f77442daf1b1d97733457d12bcabdf79441"},
+        "target_pre_size": {"const": 22},
+        "backup_path": {"type": "string", "minLength": 1},
+        "quarantine_path": {"type": "string", "minLength": 1},
+        "repository_root": {"type": "string", "minLength": 1},
+        "recovery_receipt_path": {"type": "string", "minLength": 1},
+        "identity_sha256": {"$ref": "#/$defs/sha256"},
+        "phase": {
+          "enum": [
+            "AUTHORIZED",
+            "EFFECT_INTENT",
+            "EFFECT_PREPARED",
+            "REPAIR_PREPARED",
+            "ROLLBACK_REQUIRED",
+            "RESULT_READY",
+            "COMPLETE"
+          ]
+        },
+        "authority_consumed": {"type": "boolean"},
+        "registered_at": {"type": "string", "minLength": 1},
+        "effect_receipt": {"$ref": "#/$defs/effectReceipt"},
+        "probe_result": {"type": "object"},
+        "recovery_result": {"type": "object"},
+        "supervisor_result": {"type": "object"},
+        "completed_at": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"phase": {"const": "AUTHORIZED"}}},
+          "then": {"properties": {"authority_consumed": {"const": false}}}
+        },
+        {
+          "if": {"properties": {"phase": {"const": "EFFECT_INTENT"}}},
+          "then": {
+            "required": ["effect_receipt"],
+            "properties": {
+              "authority_consumed": {"const": false},
+              "effect_receipt": {
+                "properties": {
+                  "phase": {"const": "EFFECT_INTENT"},
+                  "authority_consumed": {"const": false}
+                },
+                "required": ["phase", "authority_consumed"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": ["EFFECT_PREPARED", "REPAIR_PREPARED", "ROLLBACK_REQUIRED"]
+              }
+            }
+          },
+          "then": {
+            "required": ["effect_receipt"],
+            "properties": {
+              "authority_consumed": {"const": true},
+              "effect_receipt": {
+                "properties": {"authority_consumed": {"const": true}},
+                "required": ["authority_consumed"]
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"phase": {"const": "ROLLBACK_REQUIRED"}}},
+          "then": {"required": ["probe_result"]}
+        },
+        {
+          "if": {"properties": {"phase": {"enum": ["RESULT_READY", "COMPLETE"]}}},
+          "then": {"required": ["recovery_result"]}
+        },
+        {
+          "if": {"properties": {"phase": {"const": "COMPLETE"}}},
+          "then": {"required": ["supervisor_result", "completed_at"]}
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
 }

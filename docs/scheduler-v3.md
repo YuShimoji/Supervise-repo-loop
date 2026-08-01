@@ -91,7 +91,8 @@ The plan exposes:
 - one exact next action and stable action ID;
 - every ready action that remains eligible;
 - the short-lived scheduler claim;
-- every active repository route lease and exact wait target;
+- every active repository route lease plus transport-specific `wait_targets`
+  for Codex Workers and `poll_targets` for ChatGPT Supervisors;
 - concurrency capacity and ready action count;
 - `checkpoint_after_wait_allowed`, which reports structural foreground-handoff
   eligibility when durable routes remain and no safe READY action is claimable;
@@ -162,6 +163,19 @@ when found, otherwise it resends the identical envelope. Supervisor and Worker
 routes treat the delivery token as an idempotency key. Transport itself remains
 at-least-once; this protocol provides idempotent processing and does not claim a
 transactional exactly-once guarantee across Codex tasks.
+
+Route observation is transport-aware. A persistent Codex Worker task is
+eligible for `wait_threads`; a ChatGPT Supervisor chat is not. Each foreground
+or recovery pass polls its exact Supervisor chats once with `read_thread`, then
+builds one `wait_threads` call from only the exact Worker tasks. The route lease
+persists the observer kind so an unsupported ChatGPT ID cannot be silently
+dropped after `wait_threads` rejects it.
+
+Typed runtime recovery is a separate local-effect lifecycle described in
+[authorized-runtime-recovery.md](authorized-runtime-recovery.md). An adopted
+repair disposition becomes an exact scheduler action rather than an unchanged
+BLOCKED probe. Its evidence-bound claim cannot complete without a durable
+effect receipt or be released after preparation.
 
 The normal deployment has one Coordinator writer. A second writer is not
 authorized. Multiple route leases represent independent recipient waits, not
@@ -277,29 +291,36 @@ For actions that send to a Supervisor or Worker:
    receipt/cursor;
 4. move it to a repository-scoped route lease, release the scheduler claim,
    and repeat from step 1 for another repository while capacity remains;
-5. issue one multi-target wait, for at most 60 seconds, containing every exact
-   route target and current cursor;
-6. consume and persist the first semantic result and complete only its lease;
+5. poll every exact ChatGPT Supervisor target once, then issue one multi-target
+   wait for at most 60 seconds containing only Codex Worker targets and their
+   current cursors;
+6. consume and persist the first semantic result from either observer and
+   complete only its lease;
 7. recompute the plan, drain any required protocol handoff to its next exact
    wait or terminal, and fill capacity again;
 8. if the wait is unchanged, save the wait set, checkpoint silently, and arm
    recovery only after the foreground turn has stopped;
-9. pause recovery when no route lease remains.
+9. pause recovery only when the rebuilt plan reports
+   `watchdog_should_be_armed=false`.
 
 An active execution lease suppresses a duplicate ready projection for the same
 repository/Mission/attempt and defers same-repository authority maintenance.
 A route with a missing cursor is not checkpoint-safe: take one immediate exact
 snapshot and attach its cursor to the existing token/hash lease first.
 
-Local-only actions never arm recovery. An unprepared scheduler claim does not
-justify a periodic wake; recovery exists for durable prepared deliveries and
-route leases only.
+Ordinary local-only actions never arm recovery. An unprepared scheduler claim
+and an `AUTHORIZED` runtime record do not justify a periodic wake. Recovery
+exists for durable prepared deliveries, route leases, and a typed runtime
+ledger from `EFFECT_INTENT` through `RESULT_READY`. These phases remain
+recovery-owned even during the bounded gaps between local repair, Worker
+probe, rollback, and Supervisor-return claims.
 
 If the foreground wait returns a result, no recovery model turn runs. If the
 foreground pass checkpoints with unchanged active routes, the recovery wake
 resumes only their exact wait set. A `prepared` delivery is reconciled by exact
 delivery token before any resend. A wake with no prepared delivery or route
-lease must pause itself immediately and must not inspect every project.
+lease may pause only when no recovery-owned runtime phase remains; it must not
+inspect every project.
 
 ## Acceptance boundary
 

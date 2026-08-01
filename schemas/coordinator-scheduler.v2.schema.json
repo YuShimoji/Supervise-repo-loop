@@ -74,6 +74,9 @@
         "mission_id": {"type": ["string", "null"]},
         "attempt_id": {},
         "route_class": {"enum": ["local", "control", "execution"]},
+        "observer_kind": {
+          "enum": ["codex_wait", "chatgpt_poll"]
+        },
         "owner_task_id": {"type": ["string", "null"]},
         "recipient_thread_id": {"type": ["string", "null"]},
         "packet_sha256": {
@@ -89,6 +92,18 @@
         "prepared_at": {"type": "string"},
         "sent_at": {"type": "string"},
         "leased_at": {"type": "string"}
+        ,"effect_receipt": {
+          "type": "object",
+          "required": ["path", "identity_sha256"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "identity_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },
@@ -96,7 +111,7 @@
       "allOf": [
         {"$ref": "#/$defs/baseActiveRecord"},
         {
-          "properties": {"status": {"enum": ["claimed", "prepared"]}},
+          "properties": {"status": {"enum": ["claimed", "prepared", "effect_prepared"]}},
           "required": ["status"],
           "allOf": [
             {
@@ -111,6 +126,15 @@
                   "delivery_token"
                 ]
               }
+            },
+            {
+              "if": {
+                "properties": {"status": {"const": "effect_prepared"}},
+                "required": ["status"]
+              },
+              "then": {
+                "required": ["effect_receipt"]
+              }
             }
           ]
         }
@@ -123,6 +147,7 @@
           "properties": {"status": {"enum": ["sent", "waiting"]}},
           "required": [
             "status",
+            "observer_kind",
             "recipient_thread_id",
             "packet_sha256",
             "delivery_token"
@@ -136,6 +161,7 @@
       "properties": {
         "action_id": {"type": "string", "minLength": 1},
         "kind": {"type": "string", "minLength": 1},
+        "action": {"type": ["object", "null"]},
         "requires_external_result": {"type": "boolean"},
         "state_fingerprint": {"type": "string", "minLength": 1},
         "outcome": {"type": "string", "minLength": 1},

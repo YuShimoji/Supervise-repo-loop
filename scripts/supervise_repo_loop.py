@@ -27,6 +27,7 @@ DEFAULT_BINDINGS = SKILL_ROOT / "state" / "bindings.v2.json"
 DEFAULT_HOSTS = SKILL_ROOT / "state" / "hosts.v2.json"
 DEFAULT_ADAPTER = SKILL_ROOT / "state" / "adapter-snapshot.v1.json"
 DEFAULT_COORDINATOR_STATE = SKILL_ROOT / "state" / "coordinator-state.v2.json"
+DEFAULT_COORDINATOR_EVENTS = SKILL_ROOT / "state" / "events"
 # Keep the installed filename stable while migrating its contents to schema v2.
 # Coordinator state already points at this path, so changing the filename would
 # strand the live waiting route during deployment.
@@ -162,7 +163,59 @@ PROTOCOL_HANDOFF_ACTION_KINDS = {
     "await_supervisor_work_order",
     "await_worker_result",
     "return_worker_result",
+    "probe_authorized_runtime_repair",
+    "return_authorized_runtime_recovery_result",
 }
+
+AUTHORIZED_RUNTIME_HANDLER_ID = "codex_windows_deny_read_acl_state_v1"
+AUTHORIZED_RUNTIME_HANDLER_VERSION = 1
+AUTHORIZED_RUNTIME_TARGET_PRE_SIZE = 22
+AUTHORIZED_RUNTIME_TARGET_PRE_SHA256 = (
+    "6a4875ddaceaa91fb3369f0f6d962f77442daf1b1d97733457d12bcabdf79441"
+)
+AUTHORIZED_RUNTIME_REPAIR_EXECUTION_SURFACE = "runtime_owner_maintenance"
+AUTHORIZED_RUNTIME_PROBE_EXECUTION_SURFACE = "restricted_workspace_write"
+AUTHORIZED_RUNTIME_DISALLOWED_PROBE_SURFACE = "danger-full-access"
+AUTHORIZED_RUNTIME_REPAIR_EXECUTOR_AUTHORITY = (
+    "runtime-owner maintenance surface on the same Thank host"
+)
+AUTHORIZED_RUNTIME_PHASES = {
+    "AUTHORIZED",
+    "EFFECT_INTENT",
+    "EFFECT_PREPARED",
+    "REPAIR_PREPARED",
+    "ROLLBACK_REQUIRED",
+    "RESULT_READY",
+    "COMPLETE",
+}
+AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS = {
+    "execute_authorized_runtime_repair",
+    "rollback_authorized_runtime_repair",
+}
+AUTHORIZED_RUNTIME_EXTERNAL_ACTION_KINDS = {
+    "probe_authorized_runtime_repair",
+    "return_authorized_runtime_recovery_result",
+}
+AUTHORIZED_RUNTIME_ACTION_KINDS = (
+    AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS
+    | AUTHORIZED_RUNTIME_EXTERNAL_ACTION_KINDS
+)
+ROUTE_OBSERVER_KINDS = {"codex_wait", "chatgpt_poll"}
+
+
+DEFAULT_CODEX_DENY_READ_STATE_PATH = Path(
+    r"C:\Users\thank\.codex\.sandbox\deny_read_acl_state.json"
+)
+AUTHORIZED_RUNTIME_RECEIPT_RELATIVE_PATH = (
+    Path("production_pilots")
+    / "factory_canaries"
+    / "food_expiry_labels_001"
+    / "auto_video_runs"
+    / "japanese_final_form_candidate_v1_thank_recovery"
+    / "_evidence"
+    / "codex_sandbox_recovery_v1"
+    / "recovery_receipt.json"
+)
 
 
 class ProtocolError(RuntimeError):
@@ -242,6 +295,27 @@ def atomic_write_text(path: Path | str, value: str) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+
+
+def atomic_write_bytes(path: Path | str, value: bytes) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _normalized_absolute_path(path: Path | str) -> str:
+    return os.path.normcase(str(Path(path).expanduser().resolve(strict=False)))
 
 
 def validate_blocked_contract(contract: dict[str, Any]) -> None:
@@ -721,6 +795,7 @@ PORTFOLIO_ACTIVE_ROUTE_FIELDS = (
     "delivery_token",
     "after_cursor",
     "status",
+    "observer_kind",
 )
 
 
@@ -736,6 +811,7 @@ def _normalize_portfolio_active_route(
         "recipient_thread_id",
         "delivery_token",
         "status",
+        "observer_kind",
     ):
         if not isinstance(normalized[field], str) or not normalized[field]:
             raise ProtocolError(f"{label} requires {field}")
@@ -743,6 +819,8 @@ def _normalize_portfolio_active_route(
         raise ProtocolError(f"{label} delivery_token must be SHA-256")
     if normalized["status"] not in {"prepared", "sent", "waiting"}:
         raise ProtocolError(f"{label} status is not an active route status")
+    if normalized["observer_kind"] not in ROUTE_OBSERVER_KINDS:
+        raise ProtocolError(f"{label} observer_kind is not supported")
     after_cursor = normalized["after_cursor"]
     if after_cursor is not None and not isinstance(after_cursor, str):
         raise ProtocolError(f"{label} after_cursor must be a string or null")
@@ -878,6 +956,7 @@ def _scheduler_route_portfolio_projection(route: dict[str, Any]) -> dict[str, An
         "delivery_token": str(route.get("delivery_token") or ""),
         "after_cursor": route.get("after_cursor"),
         "status": str(route.get("status") or ""),
+        "observer_kind": str(route.get("observer_kind") or ""),
     }
     return _normalize_portfolio_active_route(
         projected, label=f"active scheduler route {action_id or '<missing>'}"
@@ -968,6 +1047,7 @@ def validate_portfolio_scheduler_consistency(
     for route in active_routes:
         action_id = str(route.get("action_id") or "")
         recipient_thread_id = str(route.get("recipient_thread_id") or "")
+        observer_kind = str(route.get("observer_kind") or "")
         repository_id = str(
             route.get("repository_id")
             or _action_repository_id(route.get("action", {}))
@@ -985,6 +1065,7 @@ def validate_portfolio_scheduler_consistency(
             for label, value in (
                 ("action_id", action_id),
                 ("recipient_thread_id", recipient_thread_id),
+                ("observer_kind", observer_kind),
             )
             if not value or value not in route_owner
         ]
@@ -1015,8 +1096,8 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
                 "",
                 "## Active external routes",
                 "",
-                "| Project | Status | Action | Exact recipient | Wait cursor |",
-                "|---|---|---|---|---|",
+                "| Project | Status | Observer | Action | Exact recipient | Cursor |",
+                "|---|---|---|---|---|---|",
             ]
         )
         project_names = {
@@ -1034,6 +1115,7 @@ def render_portfolio_markdown(portfolio: dict[str, Any]) -> str:
                     for value in (
                         project_names.get(repository_id, repository_id),
                         route.get("status"),
+                        route.get("observer_kind"),
                         route.get("action_id"),
                         route.get("recipient_thread_id"),
                         route.get("after_cursor") or "not recorded",
@@ -1292,6 +1374,61 @@ def _adapter_threads(adapter: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _route_observer_kind(
+    adapter: dict[str, Any], recipient_thread_id: str | None
+) -> str | None:
+    projection = _route_observer_projection(adapter, recipient_thread_id)
+    return (
+        str(projection["observer_kind"])
+        if isinstance(projection, dict)
+        else None
+    )
+
+
+def _route_observer_projection(
+    adapter: dict[str, Any], recipient_thread_id: str | None
+) -> dict[str, str] | None:
+    """Bind an exact route to its concrete observation transport.
+
+    Codex waits require both the task id and the app host id. ChatGPT routes
+    are polled and deliberately remain hostless.
+    """
+    if not recipient_thread_id:
+        return None
+    thread = next(
+        (
+            item
+            for item in _adapter_threads(adapter)
+            if item.get("id") == recipient_thread_id
+        ),
+        None,
+    )
+    if not isinstance(thread, dict):
+        raise ProtocolError(
+            f"exact outbound recipient is absent from adapter: {recipient_thread_id}"
+        )
+    if thread.get("read_verified") is not True:
+        raise ProtocolError(
+            "exact outbound recipient is not read-verified: "
+            + recipient_thread_id
+        )
+    _require_live_thread_status(thread, "exact outbound recipient")
+    kind = str(thread.get("kind") or "")
+    if kind == "codex":
+        host_id = str(thread.get("host_id") or "")
+        if not host_id:
+            raise ProtocolError(
+                "Codex outbound recipient lacks exact adapter host_id: "
+                + recipient_thread_id
+            )
+        return {"observer_kind": "codex_wait", "host_id": host_id}
+    if kind == "chatgpt":
+        return {"observer_kind": "chatgpt_poll"}
+    raise ProtocolError(
+        f"unsupported outbound recipient transport for {recipient_thread_id}: {kind}"
+    )
+
+
 def _exact_thread(
     adapter: dict[str, Any],
     thread_id: str,
@@ -1322,6 +1459,20 @@ def _exact_thread(
     if exact.get("read_verified") is not True:
         issues.append("readback_not_verified")
     return exact, issues
+
+
+def _require_live_thread_status(thread: dict[str, Any], label: str) -> None:
+    status = str(thread.get("status") or "").casefold()
+    if not status or status in {
+        "archived",
+        "closed",
+        "completed",
+        "destroyed",
+        "inactive",
+        "invalid",
+        "stale",
+    }:
+        raise ProtocolError(f"{label} adapter status is not live: {status or 'missing'}")
 
 
 def _supervisor_binding_for(
@@ -2336,6 +2487,36 @@ def _action_route_class(action: dict[str, Any]) -> str:
     return "execution"
 
 
+def _action_observer_kind(action: dict[str, Any]) -> str | None:
+    payload = action.get("payload", {})
+    route = payload.get("route", {}) if isinstance(payload, dict) else {}
+    if isinstance(route, dict) and route.get("observer_kind") in ROUTE_OBSERVER_KINDS:
+        return str(route["observer_kind"])
+    recipient_kind = route.get("recipient_kind") if isinstance(route, dict) else None
+    if recipient_kind == "worker":
+        return "codex_wait"
+    if recipient_kind == "supervisor":
+        return "chatgpt_poll"
+    if action.get("kind") in {
+        "dispatch_work_order",
+        "await_worker_result",
+        "probe_authorized_runtime_repair",
+    }:
+        return "codex_wait"
+    if action.get("kind") in {
+        "route_direction_update",
+        "route_project_question",
+        "route_user_response",
+        "await_supervisor_verdict",
+        "await_supervisor_work_order",
+        "return_worker_result",
+        "request_next_mission",
+        "return_authorized_runtime_recovery_result",
+    }:
+        return "chatgpt_poll"
+    return None
+
+
 def _action_mission_identity(action: dict[str, Any]) -> tuple[str, str, str]:
     payload = action.get("payload", {})
     if not isinstance(payload, dict):
@@ -2360,6 +2541,9 @@ def _record_with_route_metadata(record: dict[str, Any]) -> dict[str, Any]:
         result.setdefault("mission_id", mission_id or None)
         result.setdefault("attempt_id", attempt_id or None)
         result.setdefault("route_class", _action_route_class(action))
+        observer_kind = _action_observer_kind(action)
+        if observer_kind in ROUTE_OBSERVER_KINDS:
+            result.setdefault("observer_kind", observer_kind)
     return result
 
 
@@ -2467,6 +2651,19 @@ def migrate_scheduler_state(state: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("scheduler_claim", None)
         migrated.setdefault("route_leases", [])
         migrated.setdefault("completed_actions", [])
+        if isinstance(migrated.get("scheduler_claim"), dict):
+            migrated["scheduler_claim"] = _record_with_route_metadata(
+                migrated["scheduler_claim"]
+            )
+        if isinstance(migrated.get("route_leases"), list):
+            if not all(
+                isinstance(item, dict) for item in migrated["route_leases"]
+            ):
+                raise ProtocolError("route_leases must contain objects")
+            migrated["route_leases"] = [
+                _record_with_route_metadata(item)
+                for item in migrated["route_leases"]
+            ]
         migrated.setdefault(
             "round_robin_cursor_repository_id",
             _infer_round_robin_cursor_repository_id(migrated),
@@ -2559,6 +2756,20 @@ def _validate_scheduler_record(
         for field in ("packet_sha256", "delivery_token"):
             if not re.fullmatch(r"[0-9a-fA-F]{64}", str(item.get(field) or "")):
                 raise ProtocolError(f"{label} requires {field}")
+        if item.get("observer_kind") not in ROUTE_OBSERVER_KINDS:
+            raise ProtocolError(f"{label} requires a supported observer_kind")
+    if status == "effect_prepared":
+        if action.get("kind") not in AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS:
+            raise ProtocolError(
+                f"{label} effect_prepared is restricted to authorized runtime actions"
+            )
+        receipt = item.get("effect_receipt")
+        if not isinstance(receipt, dict):
+            raise ProtocolError(f"{label} effect_prepared requires effect_receipt")
+        if not str(receipt.get("path") or "") or not re.fullmatch(
+            r"[0-9a-fA-F]{64}", str(receipt.get("identity_sha256") or "")
+        ):
+            raise ProtocolError(f"{label} has invalid effect_receipt")
     return action_id
 
 
@@ -2589,7 +2800,7 @@ def _validate_scheduler_state_v2(state: dict[str, Any]) -> None:
             _validate_scheduler_record(
                 scheduler_claim,
                 "scheduler_claim",
-                allowed_statuses={"claimed", "prepared"},
+                allowed_statuses={"claimed", "prepared", "effect_prepared"},
             )
         )
 
@@ -2845,6 +3056,9 @@ def _repository_scheduler_fingerprint(
         "routed_user_events": matching(
             coordinator_state.get("routed_user_events", [])
         ),
+        "authorized_runtime_actions": matching(
+            coordinator_state.get("authorized_runtime_actions", [])
+        ),
         "authority_signal": _semantic_scheduler_value(authority_signal),
     }
     return canonical_json_hash(payload)
@@ -2941,7 +3155,966 @@ def _selection_route(
         "supervision_lane": lane,
         "recipient_kind": recipient_kind,
         "recipient_thread_id": recipient_thread_id,
+        "observer_kind": _route_observer_kind(adapter, recipient_thread_id),
     }
+
+
+def _runtime_backup_path(target: Path, target_pre_sha256: str) -> Path:
+    return target.with_name(
+        f"{target.name}.backup.{target_pre_sha256.upper()}"
+    )
+
+
+def _runtime_quarantine_path(target: Path, target_pre_sha256: str) -> Path:
+    return target.with_name(
+        f"{target.name}.quarantine.{target_pre_sha256.upper()}"
+    )
+
+
+def _authorized_runtime_identity(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "runtime_action_id": record.get("runtime_action_id"),
+        "repository_id": record.get("repository_id"),
+        "mission_id": record.get("mission_id"),
+        "attempt_id": record.get("attempt_id"),
+        "supervision_lane": record.get("supervision_lane"),
+        "supervisor_thread_id": record.get("supervisor_thread_id"),
+        "worker_task_id": record.get("worker_task_id"),
+        "worker_host_id": record.get("worker_host_id"),
+        "worker_adapter_host_id": record.get("worker_adapter_host_id"),
+        "handler_id": record.get("handler_id"),
+        "handler_version": record.get("handler_version"),
+        "repair_execution_surface": record.get("repair_execution_surface"),
+        "probe_execution_surface": record.get("probe_execution_surface"),
+        "authorization_id": record.get("authorization_id"),
+        "authorization_action_id": record.get("authorization_action_id"),
+        "decision_evidence_sha256": record.get("decision_evidence_sha256"),
+        "decision_event_id": record.get("decision_event_id"),
+        "supervisor_text_sha256": record.get("supervisor_text_sha256"),
+        "authorization_payload_sha256": record.get(
+            "authorization_payload_sha256"
+        ),
+        "target_path": record.get("target_path"),
+        "target_pre_sha256": record.get("target_pre_sha256"),
+        "target_pre_size": record.get("target_pre_size"),
+    }
+
+
+def _authorized_runtime_record(
+    coordinator_state: dict[str, Any], runtime_action_id: str
+) -> dict[str, Any]:
+    matches = [
+        item
+        for item in coordinator_state.get("authorized_runtime_actions", [])
+        if isinstance(item, dict)
+        and item.get("runtime_action_id") == runtime_action_id
+    ]
+    if len(matches) != 1:
+        raise ProtocolError(
+            f"exact authorized runtime action is required: {runtime_action_id}"
+        )
+    return matches[0]
+
+
+def validate_authorized_runtime_action(record: dict[str, Any]) -> None:
+    if not isinstance(record, dict):
+        raise ProtocolError("authorized runtime action must be an object")
+    allowed_fields = {
+        "runtime_action_id",
+        "repository_id",
+        "mission_id",
+        "attempt_id",
+        "supervision_lane",
+        "supervisor_thread_id",
+        "worker_task_id",
+        "worker_host_id",
+        "worker_adapter_host_id",
+        "handler_id",
+        "handler_version",
+        "repair_execution_surface",
+        "probe_execution_surface",
+        "authorization_id",
+        "authorization_action_id",
+        "decision_evidence_path",
+        "decision_evidence_sha256",
+        "decision_event_id",
+        "supervisor_text_path",
+        "supervisor_text_sha256",
+        "authorization_payload_sha256",
+        "target_path",
+        "target_pre_sha256",
+        "target_pre_size",
+        "backup_path",
+        "quarantine_path",
+        "repository_root",
+        "recovery_receipt_path",
+        "identity_sha256",
+        "phase",
+        "authority_consumed",
+        "registered_at",
+        "effect_receipt",
+        "probe_result",
+        "recovery_result",
+        "supervisor_result",
+        "completed_at",
+    }
+    unexpected = sorted(set(record) - allowed_fields)
+    if unexpected:
+        raise ProtocolError(
+            "authorized runtime action has unexpected fields: "
+            + ", ".join(unexpected)
+        )
+    required_text = (
+        "runtime_action_id",
+        "repository_id",
+        "mission_id",
+        "attempt_id",
+        "supervision_lane",
+        "supervisor_thread_id",
+        "worker_task_id",
+        "worker_host_id",
+        "worker_adapter_host_id",
+        "authorization_id",
+        "authorization_action_id",
+        "decision_evidence_path",
+        "decision_event_id",
+        "supervisor_text_path",
+        "target_path",
+        "backup_path",
+        "quarantine_path",
+        "repository_root",
+        "recovery_receipt_path",
+        "registered_at",
+    )
+    for field in required_text:
+        if not isinstance(record.get(field), str) or not record[field]:
+            raise ProtocolError(f"authorized runtime action requires {field}")
+    if record.get("handler_id") != AUTHORIZED_RUNTIME_HANDLER_ID:
+        raise ProtocolError("unauthorized runtime handler")
+    if record.get("handler_version") != AUTHORIZED_RUNTIME_HANDLER_VERSION:
+        raise ProtocolError("unsupported authorized runtime handler version")
+    if (
+        record.get("repair_execution_surface")
+        != AUTHORIZED_RUNTIME_REPAIR_EXECUTION_SURFACE
+    ):
+        raise ProtocolError("authorized runtime repair execution surface mismatch")
+    if (
+        record.get("probe_execution_surface")
+        != AUTHORIZED_RUNTIME_PROBE_EXECUTION_SURFACE
+    ):
+        raise ProtocolError("authorized runtime probe execution surface mismatch")
+    if not re.fullmatch(
+        r"[0-9a-f]{32}", str(record.get("authorization_action_id") or "")
+    ):
+        raise ProtocolError("authorized runtime action requires authorization_action_id")
+    for field in (
+        "decision_evidence_sha256",
+        "supervisor_text_sha256",
+        "authorization_payload_sha256",
+        "target_pre_sha256",
+        "identity_sha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(record.get(field) or "")):
+            raise ProtocolError(f"authorized runtime action requires lowercase {field}")
+    if not isinstance(record.get("target_pre_size"), int) or int(
+        record["target_pre_size"]
+    ) < 0:
+        raise ProtocolError("authorized runtime target_pre_size must be non-negative")
+    if (
+        record["target_pre_size"] != AUTHORIZED_RUNTIME_TARGET_PRE_SIZE
+        or record["target_pre_sha256"] != AUTHORIZED_RUNTIME_TARGET_PRE_SHA256
+    ):
+        raise ProtocolError("authorized runtime target identity is not allowlisted")
+    if record.get("phase") not in AUTHORIZED_RUNTIME_PHASES:
+        raise ProtocolError("authorized runtime action has invalid phase")
+    if not isinstance(record.get("authority_consumed"), bool):
+        raise ProtocolError("authorized runtime authority_consumed must be boolean")
+    expected_target = _normalized_absolute_path(
+        DEFAULT_CODEX_DENY_READ_STATE_PATH
+    )
+    if _normalized_absolute_path(record["target_path"]) != expected_target:
+        raise ProtocolError("authorized runtime target path is not allowlisted")
+    target = Path(record["target_path"])
+    expected_backup = _runtime_backup_path(
+        target, record["target_pre_sha256"]
+    )
+    expected_quarantine = _runtime_quarantine_path(
+        target, record["target_pre_sha256"]
+    )
+    if _normalized_absolute_path(record["backup_path"]) != _normalized_absolute_path(
+        expected_backup
+    ):
+        raise ProtocolError("authorized runtime backup path drift")
+    if _normalized_absolute_path(
+        record["quarantine_path"]
+    ) != _normalized_absolute_path(expected_quarantine):
+        raise ProtocolError("authorized runtime quarantine path drift")
+    expected_receipt = (
+        Path(record["repository_root"])
+        / AUTHORIZED_RUNTIME_RECEIPT_RELATIVE_PATH
+    )
+    if _normalized_absolute_path(
+        record["recovery_receipt_path"]
+    ) != _normalized_absolute_path(expected_receipt):
+        raise ProtocolError("authorized runtime recovery receipt path drift")
+    if record["identity_sha256"] != canonical_json_hash(
+        _authorized_runtime_identity(record)
+    ):
+        raise ProtocolError("authorized runtime identity hash mismatch")
+    effect_receipt = record.get("effect_receipt")
+    if effect_receipt is not None:
+        if not isinstance(effect_receipt, dict):
+            raise ProtocolError("authorized runtime effect_receipt must be an object")
+        if set(effect_receipt) - {
+            "path",
+            "identity_sha256",
+            "phase",
+            "authority_consumed",
+            "target_pre_sha256",
+            "target_post_sha256",
+            "updated_at",
+        }:
+            raise ProtocolError("authorized runtime effect_receipt has unexpected fields")
+        if effect_receipt.get("path") != record["recovery_receipt_path"]:
+            raise ProtocolError("authorized runtime effect receipt path mismatch")
+        if effect_receipt.get("identity_sha256") != record["identity_sha256"]:
+            raise ProtocolError("authorized runtime effect receipt identity mismatch")
+        if effect_receipt.get("authority_consumed") is not record[
+            "authority_consumed"
+        ]:
+            raise ProtocolError("authorized runtime effect receipt authority mismatch")
+    if record["phase"] in {
+        "EFFECT_INTENT",
+        "EFFECT_PREPARED",
+        "REPAIR_PREPARED",
+        "ROLLBACK_REQUIRED",
+    } and not isinstance(effect_receipt, dict):
+        raise ProtocolError("effectful authorized runtime phase requires a receipt")
+    phase = str(record["phase"])
+    consumed = bool(record["authority_consumed"])
+    if phase == "AUTHORIZED":
+        if consumed or effect_receipt is not None:
+            raise ProtocolError("AUTHORIZED runtime phase must be unconsumed")
+    elif phase == "EFFECT_INTENT":
+        if consumed or effect_receipt.get("phase") != "EFFECT_INTENT":
+            raise ProtocolError("EFFECT_INTENT must be durable and unconsumed")
+    elif phase in {"EFFECT_PREPARED", "REPAIR_PREPARED", "ROLLBACK_REQUIRED"}:
+        if not consumed or effect_receipt.get("authority_consumed") is not True:
+            raise ProtocolError(f"{phase} runtime phase must be consumed")
+    if phase == "ROLLBACK_REQUIRED" and not isinstance(
+        record.get("probe_result"), dict
+    ):
+        raise ProtocolError("ROLLBACK_REQUIRED requires an exact probe_result")
+    if phase in {"AUTHORIZED", "EFFECT_INTENT", "EFFECT_PREPARED", "REPAIR_PREPARED"} and any(
+        field in record
+        for field in ("probe_result", "recovery_result", "supervisor_result", "completed_at")
+    ):
+        raise ProtocolError(f"{phase} contains a future runtime result")
+    if phase == "ROLLBACK_REQUIRED" and any(
+        field in record
+        for field in ("recovery_result", "supervisor_result", "completed_at")
+    ):
+        raise ProtocolError("ROLLBACK_REQUIRED contains a future runtime result")
+    if phase in {"RESULT_READY", "COMPLETE"}:
+        recovery_result = record.get("recovery_result")
+        if (
+            not isinstance(recovery_result, dict)
+            or not isinstance(recovery_result.get("classification"), str)
+            or not recovery_result["classification"]
+            or recovery_result.get("authority_consumed") is not consumed
+        ):
+            raise ProtocolError(f"{phase} requires an authority-bound recovery_result")
+    if phase == "RESULT_READY" and any(
+        field in record for field in ("supervisor_result", "completed_at")
+    ):
+        raise ProtocolError("RESULT_READY contains a future Supervisor result")
+    if phase == "COMPLETE" and (
+        not isinstance(record.get("supervisor_result"), dict)
+        or record["supervisor_result"].get("disposition")
+        not in {"accepted", "rejected", "reconcile"}
+        or not isinstance(
+            record["supervisor_result"].get("evidence_sha256"), str
+        )
+        or not isinstance(record.get("completed_at"), str)
+        or not record["completed_at"]
+    ):
+        raise ProtocolError("COMPLETE requires Supervisor result and completed_at")
+
+
+def register_authorized_runtime_action(
+    coordinator_state: dict[str, Any],
+    spec: dict[str, Any],
+    *,
+    registry: dict[str, Any],
+    hosts: dict[str, Any],
+    adapter: dict[str, Any],
+    scheduler_state: dict[str, Any],
+    trusted_events_dir: Path | str | None = None,
+) -> dict[str, Any]:
+    """Register one exact Supervisor-authorized, fixed-handler recovery."""
+    allowed_spec_fields = {
+        "schema_version",
+        "runtime_action_id",
+        "repository_id",
+        "mission_id",
+        "attempt_id",
+        "supervision_lane",
+        "supervisor_thread_id",
+        "worker_task_id",
+        "worker_host_id",
+        "handler_id",
+        "authorization_id",
+        "decision_evidence_path",
+        "decision_evidence_sha256",
+        "target_path",
+        "target_pre_sha256",
+        "target_pre_size",
+    }
+    unexpected = sorted(set(spec) - allowed_spec_fields)
+    if unexpected:
+        raise ProtocolError(
+            "authorized runtime spec has unexpected fields: "
+            + ", ".join(unexpected)
+        )
+    if spec.get("schema_version") != 1:
+        raise ProtocolError("authorized runtime spec schema_version must be 1")
+    required = allowed_spec_fields - {"schema_version"}
+    missing = sorted(field for field in required if field not in spec)
+    if missing:
+        raise ProtocolError(
+            "authorized runtime spec missing: " + ", ".join(missing)
+        )
+    if spec.get("handler_id") != AUTHORIZED_RUNTIME_HANDLER_ID:
+        raise ProtocolError("unauthorized runtime handler")
+    target_path = str(spec.get("target_path") or "")
+    if _normalized_absolute_path(target_path) != _normalized_absolute_path(
+        DEFAULT_CODEX_DENY_READ_STATE_PATH
+    ):
+        raise ProtocolError("authorized runtime target path is not allowlisted")
+    decision_path = Path(str(spec.get("decision_evidence_path") or ""))
+    trusted_root = Path(
+        DEFAULT_COORDINATOR_EVENTS
+        if trusted_events_dir is None
+        else trusted_events_dir
+    ).resolve(strict=False)
+    try:
+        decision_path.resolve(strict=False).relative_to(trusted_root)
+    except ValueError as exc:
+        raise ProtocolError(
+            "Supervisor decision evidence is outside the trusted event ledger"
+        ) from exc
+    evidence_sha = str(spec.get("decision_evidence_sha256") or "").lower()
+    if not decision_path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha):
+        raise ProtocolError("exact Supervisor decision evidence is required")
+    if sha256_file(decision_path) != evidence_sha:
+        raise ProtocolError("Supervisor decision evidence SHA-256 mismatch")
+    decision = load_json(decision_path)
+    required_decision_values = {
+        "event_kind": "SUPERVISOR_DIRECTION_UPDATE_VERDICT",
+        "disposition": "ADOPTED",
+        "repository_id": str(spec.get("repository_id") or ""),
+        "mission_id": str(spec.get("mission_id") or ""),
+        "supervisor_thread_id": str(spec.get("supervisor_thread_id") or ""),
+        "authorization_id": str(spec.get("authorization_id") or ""),
+        "resulting_action_id": str(spec.get("runtime_action_id") or ""),
+        "repair_authorization_gate": "SATISFIED",
+        "runtime_recovery_gate": "PENDING",
+    }
+    for field, expected in required_decision_values.items():
+        if str(decision.get(field) or "") != expected:
+            raise ProtocolError(
+                f"Supervisor decision evidence does not authorize {field}"
+            )
+    if str(decision.get("attempt_id") or "") != str(
+        spec.get("attempt_id") or ""
+    ):
+        raise ProtocolError("Supervisor decision evidence attempt mismatch")
+    decision_event_id = str(decision.get("event_id") or "")
+    if not decision_event_id:
+        raise ProtocolError("Supervisor decision evidence requires event_id")
+    supervisor_text_path = Path(
+        str(decision.get("supervisor_text_path") or "")
+    )
+    supervisor_text_sha = str(
+        decision.get("supervisor_text_sha256") or ""
+    ).lower()
+    if (
+        not supervisor_text_path.is_file()
+        or not re.fullmatch(r"[0-9a-f]{64}", supervisor_text_sha)
+        or sha256_file(supervisor_text_path) != supervisor_text_sha
+    ):
+        raise ProtocolError("Supervisor text evidence identity mismatch")
+    supervisor_text = supervisor_text_path.read_text(encoding="utf-8")
+    action_match = re.search(
+        r"action_id:\s*\r?\n\s*([0-9a-fA-F]{32})",
+        supervisor_text,
+    )
+    payload_match = re.search(
+        r"payload_sha256:\s*\r?\n\s*([0-9a-fA-F]{64})",
+        supervisor_text,
+    )
+    if action_match is None or payload_match is None:
+        raise ProtocolError("Supervisor text lacks authorization delivery identity")
+    authorization_action_id = action_match.group(1).lower()
+    authorization_payload_sha = payload_match.group(1).lower()
+    if str(spec.get("target_path") or "") not in supervisor_text:
+        raise ProtocolError("Supervisor text exact target does not match spec")
+    if str(AUTHORIZED_RUNTIME_TARGET_PRE_SIZE) not in supervisor_text or (
+        AUTHORIZED_RUNTIME_TARGET_PRE_SHA256.upper() not in supervisor_text.upper()
+    ):
+        raise ProtocolError("Supervisor text target identity does not match handler")
+    repair_executor_match = re.search(
+        r"(?mi)^repair_executor:\s*\r?\n[ \t]+([^\r\n]+)$",
+        supervisor_text,
+    )
+    required_probe_surface_match = re.search(
+        r"(?mi)^required_probe_surface:\s*\r?\n[ \t]+([^\r\n]+)$",
+        supervisor_text,
+    )
+    disallowed_probe_surface_match = re.search(
+        r"(?mi)^disallowed_probe_surface:\s*\r?\n[ \t]+([^\r\n]+)$",
+        supervisor_text,
+    )
+    repair_executor = (
+        repair_executor_match.group(1).strip()
+        if repair_executor_match is not None
+        else ""
+    )
+    if repair_executor.casefold() != (
+        AUTHORIZED_RUNTIME_REPAIR_EXECUTOR_AUTHORITY.casefold()
+    ):
+        raise ProtocolError(
+            "Supervisor text does not bind repair to the Thank runtime owner"
+        )
+    required_probe_surface = (
+        required_probe_surface_match.group(1).strip().casefold()
+        if required_probe_surface_match is not None
+        else ""
+    )
+    if required_probe_surface != "restricted workspace-write windows sandbox":
+        raise ProtocolError(
+            "Supervisor text does not bind probe to restricted workspace-write"
+        )
+    disallowed_probe_surface = (
+        disallowed_probe_surface_match.group(1).strip().casefold()
+        if disallowed_probe_surface_match is not None
+        else ""
+    )
+    if disallowed_probe_surface != AUTHORIZED_RUNTIME_DISALLOWED_PROBE_SURFACE:
+        raise ProtocolError(
+            "Supervisor text does not disallow danger-full-access probe"
+        )
+    _ensure_scheduler_state_v2(scheduler_state)
+    authorization_completion = next(
+        (
+            item
+            for item in scheduler_state.get("completed_actions", [])
+            if isinstance(item, dict)
+            and item.get("action_id") == authorization_action_id
+        ),
+        None,
+    )
+    if not isinstance(authorization_completion, dict):
+        raise ProtocolError("authorization delivery is absent from scheduler history")
+    expected_completion = {
+        "kind": "route_direction_update",
+        "outcome": "ADOPTED_RUNTIME_RECOVERY_ACTION",
+        "packet_sha256": authorization_payload_sha,
+        "recipient_thread_id": str(spec.get("supervisor_thread_id") or ""),
+        "repository_id": str(spec.get("repository_id") or ""),
+        "route_class": "control",
+    }
+    for field, expected in expected_completion.items():
+        if authorization_completion.get(field) != expected:
+            raise ProtocolError(
+                f"authorization scheduler completion {field} mismatch"
+            )
+    completion_evidence = Path(
+        str(authorization_completion.get("evidence") or "")
+    )
+    if not completion_evidence.is_absolute():
+        completion_evidence = SKILL_ROOT / completion_evidence
+    if _normalized_absolute_path(
+        completion_evidence
+    ) != _normalized_absolute_path(decision_path):
+        raise ProtocolError("authorization scheduler evidence path mismatch")
+    target_pre_sha = str(spec.get("target_pre_sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", target_pre_sha):
+        raise ProtocolError("target_pre_sha256 must be a SHA-256 digest")
+    if not isinstance(spec.get("target_pre_size"), int) or int(
+        spec["target_pre_size"]
+    ) < 0:
+        raise ProtocolError("target_pre_size must be a non-negative integer")
+    if (
+        target_pre_sha != AUTHORIZED_RUNTIME_TARGET_PRE_SHA256
+        or int(spec["target_pre_size"]) != AUTHORIZED_RUNTIME_TARGET_PRE_SIZE
+    ):
+        raise ProtocolError("authorized runtime target identity is not allowlisted")
+
+    repository_id = str(spec.get("repository_id") or "")
+    lane = str(spec.get("supervision_lane") or "")
+    supervisor = _supervisor_binding_for(registry, repository_id, lane)
+    if (
+        not isinstance(supervisor, dict)
+        or supervisor.get("binding_status") != "active"
+        or supervisor.get("supervisor_thread_id")
+        != spec.get("supervisor_thread_id")
+    ):
+        raise ProtocolError("authorized runtime Supervisor binding mismatch")
+    supervisor_thread, supervisor_issues = _exact_thread(
+        adapter,
+        str(spec["supervisor_thread_id"]),
+        kind="chatgpt",
+        title=str(supervisor.get("expected_supervisor_title") or ""),
+        project_id=str(supervisor.get("supervisor_project_id") or ""),
+    )
+    if supervisor_issues or not isinstance(supervisor_thread, dict):
+        raise ProtocolError(
+            "authorized runtime Supervisor adapter binding is not read-verified: "
+            + ", ".join(supervisor_issues or ["exact_thread_missing"])
+        )
+    _require_live_thread_status(supervisor_thread, "authorized runtime Supervisor")
+    worker_host_id = str(spec.get("worker_host_id") or "")
+    worker_binding = _worker_binding_for(registry, repository_id, worker_host_id)
+    if (
+        not isinstance(worker_binding, dict)
+        or worker_binding.get("binding_status") != "active"
+        or worker_binding.get("worker_task_id") != spec.get("worker_task_id")
+        or worker_binding.get("host_id") != worker_host_id
+    ):
+        raise ProtocolError("authorized runtime Worker binding mismatch")
+    host = host_by_alias(hosts, worker_host_id)
+    if not isinstance(host, dict):
+        raise ProtocolError("authorized runtime Worker host is unavailable")
+    repository_root = str(
+        host.get("known_repository_roots", {}).get(repository_id) or ""
+    )
+    if not repository_root or not Path(repository_root).is_dir():
+        raise ProtocolError("authorized runtime repository root is unavailable")
+    root_verification = host.get("root_verifications", {}).get(repository_id)
+    if (
+        _normalized_absolute_path(str(worker_binding.get("root_hint") or ""))
+        != _normalized_absolute_path(repository_root)
+        or not isinstance(root_verification, dict)
+        or root_verification.get("repository_id") != repository_id
+        or _normalized_absolute_path(str(root_verification.get("root") or ""))
+        != _normalized_absolute_path(repository_root)
+    ):
+        raise ProtocolError("authorized runtime repository root binding mismatch")
+    host_aliases = [
+        worker_host_id,
+        *host.get("app_host_ids", []),
+        *_aliases(host),
+    ]
+    worker_thread, worker_issues = _exact_thread(
+        adapter,
+        str(spec["worker_task_id"]),
+        kind="codex",
+        host_aliases=host_aliases,
+    )
+    if worker_issues or not isinstance(worker_thread, dict):
+        raise ProtocolError(
+            "authorized runtime Worker adapter binding is not read-verified: "
+            + ", ".join(worker_issues or ["exact_thread_missing"])
+        )
+    _require_live_thread_status(worker_thread, "authorized runtime Worker")
+    if (
+        worker_thread.get("repository_id") != repository_id
+        or _normalized_absolute_path(str(worker_thread.get("cwd") or ""))
+        != _normalized_absolute_path(repository_root)
+    ):
+        raise ProtocolError("authorized runtime Worker repository/cwd mismatch")
+    worker_projection = _route_observer_projection(
+        adapter, str(spec["worker_task_id"])
+    )
+    worker_observer = (
+        worker_projection.get("observer_kind")
+        if isinstance(worker_projection, dict)
+        else None
+    )
+    supervisor_observer = _route_observer_kind(
+        adapter, str(spec["supervisor_thread_id"])
+    )
+    if worker_observer != "codex_wait" or supervisor_observer != "chatgpt_poll":
+        raise ProtocolError("authorized runtime route transport mismatch")
+
+    target = Path(target_path)
+    record: dict[str, Any] = {
+        "runtime_action_id": str(spec["runtime_action_id"]),
+        "repository_id": repository_id,
+        "mission_id": str(spec["mission_id"]),
+        "attempt_id": str(spec["attempt_id"]),
+        "supervision_lane": lane,
+        "supervisor_thread_id": str(spec["supervisor_thread_id"]),
+        "worker_task_id": str(spec["worker_task_id"]),
+        "worker_host_id": worker_host_id,
+        "worker_adapter_host_id": str(worker_projection["host_id"]),
+        "handler_id": AUTHORIZED_RUNTIME_HANDLER_ID,
+        "handler_version": AUTHORIZED_RUNTIME_HANDLER_VERSION,
+        "repair_execution_surface": (
+            AUTHORIZED_RUNTIME_REPAIR_EXECUTION_SURFACE
+        ),
+        "probe_execution_surface": AUTHORIZED_RUNTIME_PROBE_EXECUTION_SURFACE,
+        "authorization_id": str(spec["authorization_id"]),
+        "authorization_action_id": authorization_action_id,
+        "decision_evidence_path": str(decision_path.resolve(strict=False)),
+        "decision_evidence_sha256": evidence_sha,
+        "decision_event_id": decision_event_id,
+        "supervisor_text_path": str(
+            supervisor_text_path.resolve(strict=False)
+        ),
+        "supervisor_text_sha256": supervisor_text_sha,
+        "authorization_payload_sha256": authorization_payload_sha,
+        "target_path": str(target.resolve(strict=False)),
+        "target_pre_sha256": target_pre_sha,
+        "target_pre_size": int(spec["target_pre_size"]),
+        "backup_path": str(_runtime_backup_path(target, target_pre_sha)),
+        "quarantine_path": str(_runtime_quarantine_path(target, target_pre_sha)),
+        "repository_root": str(Path(repository_root).resolve(strict=False)),
+        "recovery_receipt_path": str(
+            (Path(repository_root) / AUTHORIZED_RUNTIME_RECEIPT_RELATIVE_PATH).resolve(
+                strict=False
+            )
+        ),
+        "phase": "AUTHORIZED",
+        "authority_consumed": False,
+        "registered_at": utc_now(),
+    }
+    record["identity_sha256"] = canonical_json_hash(
+        _authorized_runtime_identity(record)
+    )
+    validate_authorized_runtime_action(record)
+    ledger = coordinator_state.setdefault("authorized_runtime_actions", [])
+    if not isinstance(ledger, list):
+        raise ProtocolError("authorized_runtime_actions must be a list")
+    existing = next(
+        (
+            item
+            for item in ledger
+            if isinstance(item, dict)
+            and item.get("runtime_action_id") == record["runtime_action_id"]
+        ),
+        None,
+    )
+    if isinstance(existing, dict):
+        if existing.get("identity_sha256") != record["identity_sha256"]:
+            raise ProtocolError("conflicting authorized runtime action replay")
+        return {
+            "classification": "AUTHORIZED_RUNTIME_ACTION_ALREADY_REGISTERED",
+            "runtime_action_id": record["runtime_action_id"],
+            "identity_sha256": record["identity_sha256"],
+            "deduplicated": True,
+        }
+    if any(
+        isinstance(item, dict)
+        and item.get("identity_sha256") == record["identity_sha256"]
+        for item in ledger
+    ):
+        raise ProtocolError("authorized runtime identity already has another action id")
+    ledger.append(record)
+    return {
+        "classification": "AUTHORIZED_RUNTIME_ACTION_REGISTERED",
+        "runtime_action_id": record["runtime_action_id"],
+        "identity_sha256": record["identity_sha256"],
+        "phase": record["phase"],
+        "deduplicated": False,
+    }
+
+
+def _runtime_action_payload(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "runtime_action_id": record["runtime_action_id"],
+        "identity_sha256": record["identity_sha256"],
+        "handler_id": record["handler_id"],
+        "authorization_id": record["authorization_id"],
+        "authorization_action_id": record["authorization_action_id"],
+        "authorization_payload_sha256": record[
+            "authorization_payload_sha256"
+        ],
+        "repair_execution_surface": record["repair_execution_surface"],
+        "probe_execution_surface": record["probe_execution_surface"],
+        "decision_event_id": record["decision_event_id"],
+        "decision_evidence_sha256": record["decision_evidence_sha256"],
+        "target_pre_sha256": record["target_pre_sha256"],
+        "target_pre_size": record["target_pre_size"],
+        "target_path": record["target_path"],
+        "backup_path": record["backup_path"],
+        "quarantine_path": record["quarantine_path"],
+        "recovery_receipt_path": record["recovery_receipt_path"],
+    }
+
+
+def _runtime_route(record: dict[str, Any], recipient: str) -> dict[str, Any]:
+    if recipient == "worker":
+        thread_id = record["worker_task_id"]
+        observer_kind = "codex_wait"
+        host_id = record["worker_adapter_host_id"]
+    elif recipient == "supervisor":
+        thread_id = record["supervisor_thread_id"]
+        observer_kind = "chatgpt_poll"
+        host_id = None
+    else:
+        raise ProtocolError("invalid authorized runtime recipient")
+    result = {
+        "repository_id": record["repository_id"],
+        "mission_id": record["mission_id"],
+        "attempt_id": record["attempt_id"],
+        "supervision_lane": record["supervision_lane"],
+        "recipient_kind": recipient,
+        "recipient_thread_id": thread_id,
+        "observer_kind": observer_kind,
+    }
+    if host_id is not None:
+        result["host_id"] = host_id
+    return result
+
+
+def _fixed_runtime_probe_contract(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "probe_execution_surface": record["probe_execution_surface"],
+        "same_worker_required": True,
+        "probe_a": {
+            "cwd": r"C:\tmp",
+            "argv": ["cmd.exe", "/d", "/c", "exit", "0"],
+        },
+        "postcheck": {
+            "path": record["target_path"],
+            "required": ["exists", "nonempty", "not_nul_only", "valid_json"],
+        },
+        "probe_b": {
+            "cwd": record["repository_root"],
+            "argv": ["cmd.exe", "/d", "/c", "exit", "0"],
+            "only_after": "probe_a_and_postcheck_pass",
+        },
+        "runtime_doctor": {
+            "mode": "existing_read_only_entrypoint",
+            "only_after": "probe_a_and_probe_b_pass",
+            "expected": {
+                "ymm4_discovery": "pass",
+                "ymm4_version": (
+                    "4.54.0.1+76b177dd451f9d162816dabc4ac658180e869582"
+                ),
+                "source_project_sha256": (
+                    "4f8dc13976cb4ef56ea582d75e1ff92ae9d2780fff4cf53c13923d561955bdbf"
+                ),
+                "canonical_script_sha256": (
+                    "989312b58c31ad538b4ca622cba5a9dfebec1f9288ccb1312199fdb83aec0e9e"
+                ),
+                "voice_profile": {
+                    "name": "ゆっくり霊夢赤縁",
+                    "engine": "AquesTalk V1_7",
+                    "speed": 125,
+                },
+                "acl_ownership_policy_mutation_count": 0,
+            },
+            "prohibited": ["YMM4_UI_launch", "render", "candidate_generation"],
+        },
+        "receipt_completion_required": {
+            "path": record["recovery_receipt_path"],
+            "fields": [
+                "regenerated_state.size",
+                "regenerated_state.sha256",
+                "regenerated_state.json_parse_result",
+                "probe_a",
+                "probe_b",
+                "runtime_doctor",
+                "rollback_performed",
+                "authority_consumed",
+                "mutation_counts",
+                "final_blocker_classification",
+                "product_resume_readiness",
+            ],
+        },
+        "stop_boundary": (
+            "no YMM4, render, or candidate generation before both probes pass"
+        ),
+    }
+
+
+def _runtime_completion_applied(
+    record: dict[str, Any], completion: dict[str, Any]
+) -> bool:
+    action = completion.get("action", {})
+    kind = str(action.get("kind") or "")
+    outcome = str(completion.get("outcome") or "")
+    phase = str(record.get("phase") or "")
+    if kind == "execute_authorized_runtime_repair":
+        if outcome == "repair_prepared":
+            return bool(
+                record.get("authority_consumed") is True
+                and phase
+                in {"REPAIR_PREPARED", "ROLLBACK_REQUIRED", "RESULT_READY", "COMPLETE"}
+            )
+        if outcome == "precondition_mismatch":
+            return bool(
+                phase in {"RESULT_READY", "COMPLETE"}
+                and record.get("recovery_result", {}).get("classification")
+                == "AUTHORIZED_RUNTIME_PRECONDITION_MISMATCH"
+            )
+    if kind == "probe_authorized_runtime_repair":
+        probe = record.get("probe_result", {})
+        return bool(
+            isinstance(probe, dict)
+            and probe.get("action_id") == completion.get("action_id")
+            and probe.get("outcome") == outcome
+            and str(probe.get("evidence") or "")
+            == str(completion.get("evidence") or "")
+        )
+    if kind == "rollback_authorized_runtime_repair":
+        return bool(
+            phase in {"RESULT_READY", "COMPLETE"}
+            and record.get("recovery_result", {}).get("rolled_back") is True
+        )
+    if kind == "return_authorized_runtime_recovery_result":
+        result = record.get("supervisor_result", {})
+        return bool(
+            phase == "COMPLETE"
+            and isinstance(result, dict)
+            and result.get("disposition") == outcome
+            and _normalized_absolute_path(str(result.get("evidence_path") or ""))
+            == _normalized_absolute_path(str(completion.get("evidence") or ""))
+        )
+    return False
+
+
+def _runtime_unapplied_completion(
+    record: dict[str, Any], scheduler_state: dict[str, Any]
+) -> dict[str, Any] | None:
+    for completion in scheduler_state.get("completed_actions", []):
+        if not isinstance(completion, dict):
+            continue
+        action = completion.get("action", {})
+        if not isinstance(action, dict) or action.get("kind") not in AUTHORIZED_RUNTIME_ACTION_KINDS:
+            continue
+        runtime = action.get("payload", {}).get("runtime_action", {})
+        if (
+            runtime.get("runtime_action_id") != record["runtime_action_id"]
+            or runtime.get("identity_sha256") != record["identity_sha256"]
+        ):
+            continue
+        if not _runtime_completion_applied(record, completion):
+            return completion
+    return None
+
+
+def _authorized_runtime_candidates(
+    coordinator_state: dict[str, Any],
+    scheduler_state: dict[str, Any],
+    repository_order: dict[str, int],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    candidates: list[dict[str, Any]] = []
+    active_repositories: set[str] = set()
+    active_runtime_action_ids: set[str] = set()
+    for active in [
+        scheduler_state.get("scheduler_claim"),
+        *scheduler_state.get("route_leases", []),
+    ]:
+        if not isinstance(active, dict):
+            continue
+        runtime_payload = active.get("action", {}).get("payload", {}).get(
+            "runtime_action", {}
+        )
+        runtime_action_id = str(
+            runtime_payload.get("runtime_action_id") or ""
+        )
+        if runtime_action_id:
+            active_runtime_action_ids.add(runtime_action_id)
+    for record in sorted(
+        coordinator_state.get("authorized_runtime_actions", []),
+        key=lambda item: (
+            repository_order.get(str(item.get("repository_id") or ""), 999999),
+            str(item.get("runtime_action_id") or ""),
+        ),
+    ):
+        validate_authorized_runtime_action(record)
+        if record["phase"] == "COMPLETE":
+            continue
+        repository_id = record["repository_id"]
+        active_repositories.add(repository_id)
+        unapplied = _runtime_unapplied_completion(record, scheduler_state)
+        if isinstance(unapplied, dict):
+            candidates.append(
+                _scheduler_action(
+                    "reconcile_authorized_runtime_completion",
+                    {
+                        "runtime_action": _runtime_action_payload(record),
+                        "completed_action": {
+                            "action_id": unapplied.get("action_id"),
+                            "outcome": unapplied.get("outcome"),
+                            "evidence": unapplied.get("evidence"),
+                            "sha256": canonical_json_hash(unapplied),
+                        },
+                        "route": {
+                            "repository_id": repository_id,
+                            "mission_id": record["mission_id"],
+                            "attempt_id": record["attempt_id"],
+                            "supervision_lane": record["supervision_lane"],
+                            "recipient_kind": "local_transition",
+                            "recipient_thread_id": None,
+                            "observer_kind": None,
+                        },
+                    },
+                    priority=0,
+                    stable_order=repository_order.get(repository_id, 999999),
+                )
+            )
+            continue
+        if record["runtime_action_id"] in active_runtime_action_ids:
+            continue
+        phase = record["phase"]
+        payload: dict[str, Any] = {
+            "runtime_action": _runtime_action_payload(record),
+        }
+        kind: str
+        external = False
+        if phase in {"AUTHORIZED", "EFFECT_INTENT", "EFFECT_PREPARED"}:
+            kind = "execute_authorized_runtime_repair"
+            payload["route"] = {
+                "repository_id": repository_id,
+                "mission_id": record["mission_id"],
+                "attempt_id": record["attempt_id"],
+                "supervision_lane": record["supervision_lane"],
+                "recipient_kind": "local_transition",
+                "recipient_thread_id": None,
+                "observer_kind": None,
+            }
+        elif phase == "REPAIR_PREPARED":
+            kind = "probe_authorized_runtime_repair"
+            external = True
+            payload["route"] = _runtime_route(record, "worker")
+            payload["probe_contract"] = _fixed_runtime_probe_contract(record)
+            payload["effect_receipt"] = copy.deepcopy(record["effect_receipt"])
+        elif phase == "ROLLBACK_REQUIRED":
+            kind = "rollback_authorized_runtime_repair"
+            payload["route"] = {
+                "repository_id": repository_id,
+                "mission_id": record["mission_id"],
+                "attempt_id": record["attempt_id"],
+                "supervision_lane": record["supervision_lane"],
+                "recipient_kind": "local_transition",
+                "recipient_thread_id": None,
+                "observer_kind": None,
+            }
+            payload["probe_result"] = copy.deepcopy(record.get("probe_result"))
+        elif phase == "RESULT_READY":
+            kind = "return_authorized_runtime_recovery_result"
+            external = True
+            payload["route"] = _runtime_route(record, "supervisor")
+            payload["recovery_result"] = copy.deepcopy(
+                record.get("recovery_result")
+            )
+        else:
+            raise ProtocolError(f"unsupported authorized runtime phase: {phase}")
+        candidates.append(
+            _scheduler_action(
+                kind,
+                payload,
+                priority=3,
+                stable_order=repository_order.get(repository_id, 999999),
+                requires_external_result=external,
+            )
+        )
+    return candidates, active_repositories
 
 
 def build_coordinator_plan(
@@ -3002,6 +4175,18 @@ def build_coordinator_plan(
         if isinstance(item, dict)
     }
     candidates: list[dict[str, Any]] = []
+    runtime_candidates, runtime_action_repositories = (
+        _authorized_runtime_candidates(
+            coordinator_state,
+            scheduler_state,
+            repository_order,
+        )
+    )
+    candidates.extend(
+        item
+        for item in runtime_candidates
+        if item["action_id"] not in completed_ids
+    )
 
     pending_events = sorted(
         (
@@ -3048,6 +4233,7 @@ def build_coordinator_plan(
                     "candidate_lanes": lane_candidates,
                     "recipient_kind": "supervisor",
                     "recipient_thread_id": recipient,
+                    "observer_kind": _route_observer_kind(adapter, recipient),
                 },
             },
             priority=int(event.get("priority", 2)),
@@ -3073,6 +4259,8 @@ def build_coordinator_plan(
             candidates.append(action)
 
     for repository_id in repository_order:
+        if repository_id in runtime_action_repositories:
+            continue
         repository_missions = [
             item
             for item in mission_list
@@ -3262,6 +4450,27 @@ def build_coordinator_plan(
         for item in scheduler_state.get("route_leases", [])
         if isinstance(item, dict)
     ]
+    observed_active_records = list(route_leases)
+    if (
+        isinstance(scheduler_claim, dict)
+        and scheduler_claim.get("action", {}).get("requires_external_result") is True
+        and scheduler_claim.get("status") == "prepared"
+    ):
+        observed_active_records.append(
+            _record_with_route_metadata(scheduler_claim)
+        )
+    for active_record in observed_active_records:
+        recipient_thread_id = str(
+            active_record.get("recipient_thread_id") or ""
+        )
+        expected_observer = _route_observer_kind(
+            adapter, recipient_thread_id
+        )
+        if active_record.get("observer_kind") != expected_observer:
+            raise ProtocolError(
+                "persisted route observer_kind does not match exact adapter recipient: "
+                + recipient_thread_id
+            )
     leased_action_ids = {
         str(item.get("action_id") or "") for item in route_leases
     }
@@ -3321,6 +4530,17 @@ def build_coordinator_plan(
             if item.get("state") == "WORKER_DISPATCHED"
             else item.get("supervisor_thread_id")
         )
+        legacy_observer = _route_observer_kind(adapter, str(recipient or ""))
+        expected_legacy_observer = (
+            "codex_wait"
+            if item.get("state") == "WORKER_DISPATCHED"
+            else "chatgpt_poll"
+        )
+        if legacy_observer != expected_legacy_observer:
+            raise ProtocolError(
+                "legacy inferred route transport does not match Mission recipient role: "
+                + str(recipient or "")
+            )
         legacy_routes.append(
             {
                 "action_id": "legacy-" + canonical_json_hash(
@@ -3338,29 +4558,72 @@ def build_coordinator_plan(
                 "recipient_thread_id": recipient,
                 "after_cursor": None,
                 "route_class": "execution",
+                "observer_kind": legacy_observer,
                 "legacy_inferred_route": True,
             }
         )
 
     active_routes = route_leases + legacy_routes
+    # Validate the final projection, including routes inferred from legacy
+    # Mission state.  Earlier validation of persisted leases alone is not
+    # sufficient because an inferred route must not bypass the adapter.
+    for route in active_routes:
+        recipient = str(route.get("recipient_thread_id") or "")
+        if not recipient:
+            raise ProtocolError("active route lacks an exact recipient_thread_id")
+        projection = _route_observer_projection(adapter, recipient)
+        if not isinstance(projection, dict) or (
+            route.get("observer_kind") != projection["observer_kind"]
+        ):
+            raise ProtocolError(
+                "active route observer_kind does not match exact adapter recipient: "
+                + recipient
+            )
+        if projection["observer_kind"] == "codex_wait":
+            if route.get("host_id") not in {None, projection["host_id"]}:
+                raise ProtocolError(
+                    "active Codex route host_id does not match exact adapter recipient: "
+                    + recipient
+                )
+            route["host_id"] = projection["host_id"]
+        else:
+            route.pop("host_id", None)
     wait_targets: list[dict[str, Any]] = []
-    wait_target_index: dict[tuple[str, str], int] = {}
+    poll_targets: list[dict[str, Any]] = []
+    target_indexes: dict[str, dict[tuple[str, str], int]] = {
+        "codex_wait": {},
+        "chatgpt_poll": {},
+    }
     for route in active_routes:
         recipient = str(route.get("recipient_thread_id") or "")
         if not recipient:
             continue
+        observer_kind = str(route.get("observer_kind") or "")
+        if observer_kind not in ROUTE_OBSERVER_KINDS:
+            raise ProtocolError(
+                f"active route lacks a supported observer_kind: {recipient}"
+            )
+        targets = wait_targets if observer_kind == "codex_wait" else poll_targets
+        target_index = target_indexes[observer_kind]
         cursor = str(route.get("after_cursor") or "")
-        wait_key = (recipient, cursor)
+        host_id = str(route.get("host_id") or "")
+        if observer_kind == "codex_wait" and not host_id:
+            raise ProtocolError(
+                f"Codex wait route lacks exact adapter host_id: {recipient}"
+            )
+        wait_key = (
+            f"{host_id}:{recipient}" if observer_kind == "codex_wait" else recipient,
+            cursor,
+        )
         action_id = str(route.get("action_id") or "")
-        if wait_key in wait_target_index:
-            target = wait_targets[wait_target_index[wait_key]]
+        if wait_key in target_index:
+            target = targets[target_index[wait_key]]
             action_ids = target.setdefault("action_ids", [target["action_id"]])
             if action_id and action_id not in action_ids:
                 action_ids.append(action_id)
             continue
-        wait_target_index[wait_key] = len(wait_targets)
-        wait_targets.append(
-            {
+        target_index[wait_key] = len(targets)
+        target = {
                 "action_id": action_id,
                 "action_ids": [action_id] if action_id else [],
                 "repository_id": route.get("repository_id"),
@@ -3370,11 +4633,14 @@ def build_coordinator_plan(
                 "after_cursor": route.get("after_cursor"),
                 "delivery_token": route.get("delivery_token"),
                 "status": route.get("status", "waiting"),
+                "observer_kind": observer_kind,
                 "legacy_inferred_route": bool(
                     route.get("legacy_inferred_route", False)
                 ),
             }
-        )
+        if observer_kind == "codex_wait":
+            target["host_id"] = host_id
+        targets.append(target)
 
     concurrency_limit = int(
         scheduler_state.get(
@@ -3430,7 +4696,7 @@ def build_coordinator_plan(
             0, copy.deepcopy(scheduler_claim["action"])
         )
     has_scheduler_claim = isinstance(scheduler_claim, dict)
-    has_inflight_work = bool(wait_targets)
+    has_inflight_work = bool(wait_targets or poll_targets)
     route_cursor_complete = all(
         bool(str(item.get("after_cursor") or "")) for item in route_leases
     )
@@ -3445,10 +4711,37 @@ def build_coordinator_plan(
     )
     scheduler_claim_requires_recovery = bool(
         has_scheduler_claim
-        and scheduler_claim.get("action", {}).get("requires_external_result") is True
+        and (
+            scheduler_claim.get("action", {}).get("requires_external_result") is True
+            or (
+                scheduler_claim.get("status") == "effect_prepared"
+                and scheduler_claim.get("action", {}).get("kind")
+                in AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS
+            )
+        )
+    )
+    runtime_ledger_requires_recovery = any(
+        isinstance(item, dict)
+        and item.get("phase")
+        in {
+            "EFFECT_INTENT",
+            "EFFECT_PREPARED",
+            "REPAIR_PREPARED",
+            "ROLLBACK_REQUIRED",
+            "RESULT_READY",
+        }
+        for item in coordinator_state.get("authorized_runtime_actions", [])
+    )
+    runtime_reconciliation_required = any(
+        isinstance(item, dict)
+        and _runtime_unapplied_completion(item, scheduler_state) is not None
+        for item in coordinator_state.get("authorized_runtime_actions", [])
     )
     watchdog_should_be_armed = bool(
-        scheduler_claim_requires_recovery or has_inflight_work
+        scheduler_claim_requires_recovery
+        or has_inflight_work
+        or runtime_ledger_requires_recovery
+        or runtime_reconciliation_required
     )
 
     if has_scheduler_claim or has_inflight_work:
@@ -3474,6 +4767,7 @@ def build_coordinator_plan(
             "scheduler_claim": scheduler_claim,
             "active_routes": copy.deepcopy(active_routes),
             "wait_targets": wait_targets,
+            "poll_targets": poll_targets,
             "concurrency_limit": concurrency_limit,
             "capacity_remaining": capacity_remaining,
             "round_robin_cursor_repository_id": round_robin_cursor,
@@ -3556,6 +4850,742 @@ def _route_lease_index(
         if isinstance(item, dict) and item.get("action_id") == action_id:
             return index
     return None
+
+
+def _runtime_action_from_scheduler_record(
+    active: dict[str, Any], coordinator_state: dict[str, Any]
+) -> dict[str, Any]:
+    action = active.get("action", {})
+    runtime_payload = action.get("payload", {}).get("runtime_action", {})
+    runtime_action_id = str(runtime_payload.get("runtime_action_id") or "")
+    record = _authorized_runtime_record(coordinator_state, runtime_action_id)
+    validate_authorized_runtime_action(record)
+    if runtime_payload.get("identity_sha256") != record["identity_sha256"]:
+        raise ProtocolError("claimed authorized runtime identity mismatch")
+    if "execution_surface" in runtime_payload:
+        raise ProtocolError("claimed authorized runtime uses ambiguous execution surface")
+    if (
+        runtime_payload.get("repair_execution_surface")
+        != record["repair_execution_surface"]
+    ):
+        raise ProtocolError("claimed authorized runtime repair surface mismatch")
+    if (
+        runtime_payload.get("probe_execution_surface")
+        != record["probe_execution_surface"]
+    ):
+        raise ProtocolError("claimed authorized runtime probe surface mismatch")
+    return record
+
+
+def _authorized_runtime_receipt_document(
+    record: dict[str, Any], phase: str
+) -> dict[str, Any]:
+    def preserved_file_observation(path_value: str) -> dict[str, Any]:
+        path = Path(path_value)
+        observation: dict[str, Any] = {
+            "path": path_value,
+            "exists": path.exists(),
+            "is_file": path.is_file(),
+            "size": None,
+            "sha256": None,
+            "content_class": "absent" if not path.exists() else "non_file",
+            "expected_identity_match": False,
+        }
+        if not path.is_file():
+            return observation
+        content = path.read_bytes()
+        actual_sha256 = sha256_bytes(content)
+        content_class = (
+            "empty_file"
+            if not content
+            else "all_nul_bytes"
+            if all(byte == 0 for byte in content)
+            else "non_nul_bytes"
+        )
+        observation.update(
+            {
+                "size": len(content),
+                "sha256": actual_sha256,
+                "content_class": content_class,
+                "expected_identity_match": bool(
+                    len(content) == record["target_pre_size"]
+                    and actual_sha256 == record["target_pre_sha256"]
+                    and content_class == "all_nul_bytes"
+                ),
+            }
+        )
+        return observation
+
+    result = {
+        "schema_version": 1,
+        "runtime_action_id": record["runtime_action_id"],
+        "identity_sha256": record["identity_sha256"],
+        "handler_id": record["handler_id"],
+        "authorization_id": record["authorization_id"],
+        "authorization_action_id": record["authorization_action_id"],
+        "authorization_payload_sha256": record[
+            "authorization_payload_sha256"
+        ],
+        "repair_execution_surface": record["repair_execution_surface"],
+        "probe_execution_surface": record["probe_execution_surface"],
+        "decision_evidence": {
+            "event_id": record["decision_event_id"],
+            "path": record["decision_evidence_path"],
+            "sha256": record["decision_evidence_sha256"],
+            "supervisor_text_path": record["supervisor_text_path"],
+            "supervisor_text_sha256": record["supervisor_text_sha256"],
+        },
+        "phase": phase,
+        "authority_consumed": record["authority_consumed"],
+        "original_target": {
+            "path": record["target_path"],
+            "size": record["target_pre_size"],
+            "sha256": record["target_pre_sha256"],
+            "content_class": "all_nul_bytes",
+        },
+        "backup": preserved_file_observation(record["backup_path"]),
+        "quarantine": preserved_file_observation(record["quarantine_path"]),
+        "regenerated_state": {
+            "path": record["target_path"],
+            "size": None,
+            "sha256": None,
+            "json_parse_result": "pending",
+        },
+        "probe_a": {"status": "pending"},
+        "postcheck": {"status": "pending"},
+        "probe_b": {"status": "pending"},
+        "runtime_doctor": {
+            "status": "pending",
+            "expected": _fixed_runtime_probe_contract(record)[
+                "runtime_doctor"
+            ]["expected"],
+        },
+        "rollback_performed": False,
+        "mutation_counts": {
+            "acl": 0,
+            "ownership": 0,
+            "os_policy": 0,
+            "execution_policy": 0,
+        },
+        "final_blocker_classification": "PENDING",
+        "product_resume_readiness": "NOT_YET_SATISFIED",
+        "updated_at": utc_now(),
+    }
+    if isinstance(record.get("probe_result"), dict):
+        result["probe_result"] = copy.deepcopy(record["probe_result"])
+        probe_outcome = record["probe_result"].get("outcome")
+        if probe_outcome == "probe_a_failed":
+            result["probe_a"] = {"status": "failed"}
+            result["final_blocker_classification"] = (
+                "CODEX_SANDBOX_STATE_REPAIR_FAILED"
+            )
+        elif probe_outcome == "probe_b_failed":
+            result["probe_a"] = {"status": "passed"}
+            result["probe_b"] = {"status": "failed"}
+            result["final_blocker_classification"] = (
+                "CWD_OR_PATH_SCOPED_SANDBOX_FAILURE"
+            )
+        elif probe_outcome == "runtime_doctor_failed":
+            result["probe_a"] = {"status": "passed"}
+            result["probe_b"] = {"status": "passed"}
+            result["runtime_doctor"]["status"] = "failed"
+            result["final_blocker_classification"] = (
+                "SANDBOX_RECOVERED_RUNTIME_READINESS_FAILED"
+            )
+        elif probe_outcome == "probe_passed":
+            result["probe_a"] = {"status": "passed"}
+            result["probe_b"] = {"status": "passed"}
+            result["runtime_doctor"]["status"] = "passed"
+            result["final_blocker_classification"] = (
+                "RUNTIME_RECOVERY_PASSED_AWAITING_SUPERVISOR"
+            )
+    # A Worker-owned probe receipt is evidence, not a template.  Later local
+    # rollback transitions may annotate it, but must retain every detailed
+    # command, cwd, sandbox, exit/error, postcheck, and regenerated-state field.
+    receipt_path = Path(record["recovery_receipt_path"])
+    if isinstance(record.get("probe_result"), dict) and receipt_path.is_file():
+        try:
+            existing = load_json(receipt_path)
+        except (OSError, json.JSONDecodeError, ProtocolError):
+            existing = None
+        if (
+            isinstance(existing, dict)
+            and existing.get("runtime_action_id") == record["runtime_action_id"]
+            and existing.get("identity_sha256") == record["identity_sha256"]
+            and existing.get("probe_action_id")
+            == record["probe_result"].get("action_id")
+        ):
+            coordinator_owned = {
+                "phase",
+                "authority_consumed",
+                "rollback_performed",
+                "final_blocker_classification",
+                "product_resume_readiness",
+                "recovery_result",
+                "supervisor_result",
+                "updated_at",
+            }
+            for field, value in existing.items():
+                if field not in coordinator_owned:
+                    result[field] = copy.deepcopy(value)
+    if isinstance(record.get("recovery_result"), dict):
+        result["recovery_result"] = copy.deepcopy(record["recovery_result"])
+        result["rollback_performed"] = bool(
+            record["recovery_result"].get("rolled_back", False)
+        )
+        result["final_blocker_classification"] = str(
+            record["recovery_result"].get("classification")
+            or result["final_blocker_classification"]
+        )
+    return result
+
+
+def _write_authorized_runtime_receipt(
+    record: dict[str, Any], phase: str
+) -> dict[str, Any]:
+    receipt_path = Path(record["recovery_receipt_path"])
+    document = _authorized_runtime_receipt_document(record, phase)
+    atomic_write_json(receipt_path, document)
+    effect_receipt = {
+        "path": str(receipt_path),
+        "identity_sha256": record["identity_sha256"],
+        "phase": phase,
+        "authority_consumed": record["authority_consumed"],
+        "target_pre_sha256": record["target_pre_sha256"],
+        "updated_at": document["updated_at"],
+    }
+    target = Path(record["target_path"])
+    if target.is_file():
+        effect_receipt["target_post_sha256"] = sha256_file(target)
+    record["effect_receipt"] = effect_receipt
+    return effect_receipt
+
+
+def _planned_authorized_runtime_effect_receipt(
+    record: dict[str, Any]
+) -> dict[str, Any]:
+    existing = record.get("effect_receipt")
+    if isinstance(existing, dict):
+        return copy.deepcopy(existing)
+    return {
+        "path": record["recovery_receipt_path"],
+        "identity_sha256": record["identity_sha256"],
+        "phase": "EFFECT_INTENT",
+        "authority_consumed": False,
+        "target_pre_sha256": record["target_pre_sha256"],
+        "updated_at": utc_now(),
+    }
+
+
+def _prepare_authorized_runtime_effect_claim(
+    scheduler_state: dict[str, Any],
+    action_id: str,
+    effect_receipt: dict[str, Any],
+) -> None:
+    active = scheduler_state.get("scheduler_claim")
+    if not isinstance(active, dict) or active.get("action_id") != action_id:
+        raise ProtocolError("exact authorized runtime scheduler claim is required")
+    if active.get("action", {}).get("kind") not in AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS:
+        raise ProtocolError("claimed action is not an authorized runtime local effect")
+    status = str(active.get("status") or "claimed")
+    if status == "effect_prepared":
+        existing_receipt = active.get("effect_receipt")
+        if not isinstance(existing_receipt, dict) or any(
+            existing_receipt.get(field) != effect_receipt.get(field)
+            for field in ("path", "identity_sha256")
+        ):
+            raise ProtocolError("authorized runtime effect receipt replay mismatch")
+        active["effect_receipt"] = copy.deepcopy(effect_receipt)
+        return
+    if status != "claimed":
+        raise ProtocolError("authorized runtime local effect claim cannot be prepared")
+    active["status"] = "effect_prepared"
+    active["effect_receipt"] = copy.deepcopy(effect_receipt)
+    active["effect_prepared_at"] = utc_now()
+    scheduler_state["revision"] = int(scheduler_state.get("revision", 0)) + 1
+    _sync_legacy_active_claim_view(scheduler_state)
+
+
+def _runtime_target_matches_precondition(record: dict[str, Any]) -> bool:
+    target = Path(record["target_path"])
+    return bool(
+        target.is_file()
+        and target.stat().st_size == record["target_pre_size"]
+        and sha256_file(target) == record["target_pre_sha256"]
+        and all(byte == 0 for byte in target.read_bytes())
+    )
+
+
+def _runtime_completion(
+    scheduler_state: dict[str, Any], action_id: str
+) -> dict[str, Any] | None:
+    return next(
+        (
+            item
+            for item in scheduler_state.get("completed_actions", [])
+            if isinstance(item, dict) and item.get("action_id") == action_id
+        ),
+        None,
+    )
+
+
+def execute_authorized_runtime_action(
+    coordinator_state: dict[str, Any],
+    scheduler_state: dict[str, Any],
+    action_id: str,
+    *,
+    dry_run: bool = False,
+    persist_state: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Prepare the fixed deny-read state repair without running any probe."""
+    _ensure_scheduler_state_v2(scheduler_state)
+    active = scheduler_state.get("scheduler_claim")
+    if not isinstance(active, dict) or active.get("action_id") != action_id:
+        completed = _runtime_completion(scheduler_state, action_id)
+        if isinstance(completed, dict):
+            completed_action = completed.get("action", {})
+            runtime_payload = completed_action.get("payload", {}).get(
+                "runtime_action", {}
+            )
+            runtime_action_id = str(
+                runtime_payload.get("runtime_action_id") or ""
+            )
+            if runtime_action_id:
+                record = _authorized_runtime_record(
+                    coordinator_state, runtime_action_id
+                )
+                if completed.get("outcome") == "repair_prepared" and record[
+                    "phase"
+                ] in {"AUTHORIZED", "EFFECT_INTENT", "EFFECT_PREPARED"}:
+                    backup = Path(record["backup_path"])
+                    quarantine = Path(record["quarantine_path"])
+                    if not all(
+                        path.is_file()
+                        and sha256_file(path) == record["target_pre_sha256"]
+                        for path in (backup, quarantine)
+                    ):
+                        raise ProtocolError(
+                            "completed runtime repair lacks preserved recovery state"
+                        )
+                    record["authority_consumed"] = True
+                    record["phase"] = "REPAIR_PREPARED"
+                    _write_authorized_runtime_receipt(
+                        record, "REPAIR_PREPARED"
+                    )
+                elif completed.get("outcome") == "precondition_mismatch" and record[
+                    "phase"
+                ] == "AUTHORIZED":
+                    record["phase"] = "RESULT_READY"
+                    record["recovery_result"] = {
+                        "classification": "AUTHORIZED_RUNTIME_PRECONDITION_MISMATCH",
+                        "authority_consumed": False,
+                        "target_mutated": False,
+                    }
+                    _write_authorized_runtime_receipt(
+                        record, "PRECONDITION_MISMATCH"
+                    )
+                if persist_state is not None:
+                    persist_state()
+            return {
+                "classification": "AUTHORIZED_RUNTIME_REPAIR_ALREADY_EXECUTED",
+                "action_id": action_id,
+                "deduplicated": True,
+            }
+        raise ProtocolError("exact authorized runtime scheduler claim is required")
+    if active.get("action", {}).get("kind") != "execute_authorized_runtime_repair":
+        raise ProtocolError("claimed action is not the authorized runtime repair")
+    record = _runtime_action_from_scheduler_record(active, coordinator_state)
+    if record["phase"] in {
+        "REPAIR_PREPARED",
+        "ROLLBACK_REQUIRED",
+        "RESULT_READY",
+        "COMPLETE",
+    }:
+        outcome = (
+            "precondition_mismatch"
+            if record.get("recovery_result", {}).get("classification")
+            == "AUTHORIZED_RUNTIME_PRECONDITION_MISMATCH"
+            else "repair_prepared"
+        )
+        complete_coordinator_action(
+            scheduler_state,
+            action_id,
+            outcome,
+            evidence=record["recovery_receipt_path"],
+            coordinator_state=coordinator_state,
+        )
+        if persist_state is not None:
+            persist_state()
+        return {
+            "classification": "AUTHORIZED_RUNTIME_REPAIR_COMPLETION_RECONCILED",
+            "action_id": action_id,
+            "runtime_action_id": record["runtime_action_id"],
+            "deduplicated": True,
+        }
+    if record["phase"] not in {
+        "AUTHORIZED",
+        "EFFECT_INTENT",
+        "EFFECT_PREPARED",
+    }:
+        raise ProtocolError("authorized runtime repair is not executable in this phase")
+    target = Path(record["target_path"])
+    backup = Path(record["backup_path"])
+    quarantine = Path(record["quarantine_path"])
+    receipt_path = Path(record["recovery_receipt_path"])
+    target_matches = _runtime_target_matches_precondition(record)
+    preserved_pair = bool(
+        quarantine.is_file()
+        and sha256_file(quarantine) == record["target_pre_sha256"]
+        and backup.is_file()
+        and sha256_file(backup) == record["target_pre_sha256"]
+    )
+    resumable_quarantine = bool(preserved_pair and not target.exists())
+    stale_preserved_pair = bool(quarantine.exists() and target.exists())
+    if dry_run:
+        return {
+            "classification": "AUTHORIZED_RUNTIME_REPAIR_DRY_RUN",
+            "action_id": action_id,
+            "runtime_action_id": record["runtime_action_id"],
+            "target_precondition_matches": target_matches,
+            "crash_resume_available": resumable_quarantine,
+            "authority_consumed": record["authority_consumed"],
+            "would_mutate": False,
+        }
+
+    if stale_preserved_pair or (
+        not target_matches and not resumable_quarantine
+    ):
+        record["phase"] = "RESULT_READY"
+        record["recovery_result"] = {
+            "classification": "AUTHORIZED_RUNTIME_PRECONDITION_MISMATCH",
+            "authority_consumed": False,
+            "target_mutated": False,
+            "expected_sha256": record["target_pre_sha256"],
+            "observed_sha256": sha256_file(target) if target.is_file() else None,
+            "reason": (
+                "stale_preserved_pair_with_active_target"
+                if stale_preserved_pair
+                else "target_identity_mismatch"
+            ),
+        }
+        effect_receipt = _write_authorized_runtime_receipt(
+            record, "PRECONDITION_MISMATCH"
+        )
+        complete_coordinator_action(
+            scheduler_state,
+            action_id,
+            "precondition_mismatch",
+            evidence=str(receipt_path),
+            coordinator_state=coordinator_state,
+        )
+        if persist_state is not None:
+            persist_state()
+        return {
+            "classification": "AUTHORIZED_RUNTIME_PRECONDITION_MISMATCH",
+            "action_id": action_id,
+            "runtime_action_id": record["runtime_action_id"],
+            "effect_receipt": effect_receipt,
+            "authority_consumed": False,
+            "target_mutated": False,
+            "deduplicated": False,
+        }
+
+    planned_receipt = _planned_authorized_runtime_effect_receipt(record)
+    record["effect_receipt"] = copy.deepcopy(planned_receipt)
+    record["phase"] = "EFFECT_INTENT"
+    _prepare_authorized_runtime_effect_claim(
+        scheduler_state, action_id, planned_receipt
+    )
+    if persist_state is not None:
+        persist_state()
+
+    if resumable_quarantine:
+        record["authority_consumed"] = True
+
+    original_bytes: bytes
+    if backup.is_file():
+        if backup.stat().st_size != record["target_pre_size"] or sha256_file(
+            backup
+        ) != record["target_pre_sha256"]:
+            raise ProtocolError("authorized runtime backup identity mismatch")
+        original_bytes = backup.read_bytes()
+    else:
+        if not target_matches:
+            raise ProtocolError("authorized runtime target changed before backup")
+        original_bytes = target.read_bytes()
+        atomic_write_bytes(backup, original_bytes)
+        record["authority_consumed"] = True
+
+    # The durable intent predates every filesystem write.  Once the first
+    # byte-exact backup exists, authority is consumed and that transition is
+    # persisted before the target can be quarantined.
+    record["authority_consumed"] = True
+    record["phase"] = "EFFECT_PREPARED"
+    prepared_receipt = _write_authorized_runtime_receipt(
+        record, "EFFECT_PREPARED"
+    )
+    _prepare_authorized_runtime_effect_claim(
+        scheduler_state, action_id, prepared_receipt
+    )
+    if persist_state is not None:
+        persist_state()
+
+    if quarantine.is_file():
+        if quarantine.stat().st_size != record["target_pre_size"] or sha256_file(
+            quarantine
+        ) != record["target_pre_sha256"]:
+            raise ProtocolError("authorized runtime quarantine identity mismatch")
+    else:
+        if not _runtime_target_matches_precondition(record):
+            raise ProtocolError("authorized runtime target changed before quarantine")
+        os.replace(target, quarantine)
+        record["authority_consumed"] = True
+    if sha256_file(backup) != record["target_pre_sha256"] or sha256_file(
+        quarantine
+    ) != record["target_pre_sha256"]:
+        raise ProtocolError("authorized runtime preserved copy verification failed")
+    record["phase"] = "REPAIR_PREPARED"
+    effect_receipt = _write_authorized_runtime_receipt(
+        record, "REPAIR_PREPARED"
+    )
+    _prepare_authorized_runtime_effect_claim(
+        scheduler_state, action_id, effect_receipt
+    )
+    complete_coordinator_action(
+        scheduler_state,
+        action_id,
+        "repair_prepared",
+        evidence=str(receipt_path),
+        coordinator_state=coordinator_state,
+    )
+    if persist_state is not None:
+        persist_state()
+    return {
+        "classification": "AUTHORIZED_RUNTIME_REPAIR_PREPARED",
+        "action_id": action_id,
+        "runtime_action_id": record["runtime_action_id"],
+        "backup_path": str(backup),
+        "quarantine_path": str(quarantine),
+        "effect_receipt": effect_receipt,
+        "authority_consumed": True,
+        "deduplicated": False,
+    }
+
+
+def rollback_authorized_runtime_action(
+    coordinator_state: dict[str, Any],
+    scheduler_state: dict[str, Any],
+    action_id: str,
+    *,
+    dry_run: bool = False,
+    persist_state: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Restore the byte-exact original while preserving backup/quarantine."""
+    _ensure_scheduler_state_v2(scheduler_state)
+    active = scheduler_state.get("scheduler_claim")
+    if not isinstance(active, dict) or active.get("action_id") != action_id:
+        completed = _runtime_completion(scheduler_state, action_id)
+        if isinstance(completed, dict):
+            completed_action = completed.get("action", {})
+            runtime_payload = completed_action.get("payload", {}).get(
+                "runtime_action", {}
+            )
+            runtime_action_id = str(
+                runtime_payload.get("runtime_action_id") or ""
+            )
+            if runtime_action_id:
+                record = _authorized_runtime_record(
+                    coordinator_state, runtime_action_id
+                )
+                if record["phase"] == "ROLLBACK_REQUIRED":
+                    target = Path(record["target_path"])
+                    if not _runtime_target_matches_precondition(record):
+                        raise ProtocolError(
+                            "completed runtime rollback lacks restored target"
+                        )
+                    record["phase"] = "RESULT_READY"
+                    record["recovery_result"] = {
+                        "classification": "CODEX_SANDBOX_STATE_REPAIR_FAILED",
+                        "authority_consumed": True,
+                        "rolled_back": True,
+                        "target_sha256": sha256_file(target),
+                        "probe_result": copy.deepcopy(
+                            record.get("probe_result")
+                        ),
+                    }
+                    _write_authorized_runtime_receipt(
+                        record, "ROLLBACK_COMPLETE"
+                    )
+                    if persist_state is not None:
+                        persist_state()
+            return {
+                "classification": "AUTHORIZED_RUNTIME_ROLLBACK_ALREADY_COMPLETED",
+                "action_id": action_id,
+                "deduplicated": True,
+            }
+        raise ProtocolError("exact authorized runtime rollback claim is required")
+    if active.get("action", {}).get("kind") != "rollback_authorized_runtime_repair":
+        raise ProtocolError("claimed action is not the authorized runtime rollback")
+    record = _runtime_action_from_scheduler_record(active, coordinator_state)
+    if record["phase"] in {"RESULT_READY", "COMPLETE"} and record.get(
+        "recovery_result", {}
+    ).get("rolled_back") is True:
+        complete_coordinator_action(
+            scheduler_state,
+            action_id,
+            "rolled_back",
+            evidence=record["recovery_receipt_path"],
+            coordinator_state=coordinator_state,
+        )
+        if persist_state is not None:
+            persist_state()
+        return {
+            "classification": "AUTHORIZED_RUNTIME_ROLLBACK_COMPLETION_RECONCILED",
+            "action_id": action_id,
+            "runtime_action_id": record["runtime_action_id"],
+            "deduplicated": True,
+        }
+    if record["phase"] != "ROLLBACK_REQUIRED":
+        raise ProtocolError("authorized runtime rollback is not required")
+    target = Path(record["target_path"])
+    backup = Path(record["backup_path"])
+    quarantine = Path(record["quarantine_path"])
+    preserved = all(
+        path.is_file()
+        and path.stat().st_size == record["target_pre_size"]
+        and sha256_file(path) == record["target_pre_sha256"]
+        for path in (backup, quarantine)
+    )
+    if dry_run:
+        return {
+            "classification": "AUTHORIZED_RUNTIME_ROLLBACK_DRY_RUN",
+            "action_id": action_id,
+            "preserved_original_verified": preserved,
+            "would_mutate": False,
+        }
+    if not preserved:
+        raise ProtocolError("authorized runtime rollback source identity mismatch")
+    effect_receipt = _write_authorized_runtime_receipt(
+        record, "ROLLBACK_EFFECT_PREPARED"
+    )
+    _prepare_authorized_runtime_effect_claim(
+        scheduler_state, action_id, effect_receipt
+    )
+    if persist_state is not None:
+        persist_state()
+    atomic_write_bytes(target, backup.read_bytes())
+    if target.stat().st_size != record["target_pre_size"] or sha256_file(
+        target
+    ) != record["target_pre_sha256"]:
+        raise ProtocolError("authorized runtime rollback verification failed")
+    record["phase"] = "RESULT_READY"
+    record["recovery_result"] = {
+        "classification": "CODEX_SANDBOX_STATE_REPAIR_FAILED",
+        "authority_consumed": True,
+        "rolled_back": True,
+        "target_sha256": sha256_file(target),
+        "probe_result": copy.deepcopy(record.get("probe_result")),
+    }
+    effect_receipt = _write_authorized_runtime_receipt(
+        record, "ROLLBACK_COMPLETE"
+    )
+    scheduler_state["scheduler_claim"]["effect_receipt"] = copy.deepcopy(
+        effect_receipt
+    )
+    complete_coordinator_action(
+        scheduler_state,
+        action_id,
+        "rolled_back",
+        evidence=record["recovery_receipt_path"],
+        coordinator_state=coordinator_state,
+    )
+    if persist_state is not None:
+        persist_state()
+    return {
+        "classification": "AUTHORIZED_RUNTIME_ROLLBACK_COMPLETED",
+        "action_id": action_id,
+        "runtime_action_id": record["runtime_action_id"],
+        "target_sha256": record["target_pre_sha256"],
+        "backup_preserved": True,
+        "quarantine_preserved": True,
+        "effect_receipt": effect_receipt,
+        "deduplicated": False,
+    }
+
+
+def reconcile_authorized_runtime_completion(
+    coordinator_state: dict[str, Any],
+    scheduler_state: dict[str, Any],
+    action_id: str,
+    *,
+    dry_run: bool = False,
+    persist_state: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Apply one scheduler-completed runtime transition missing from the ledger."""
+    _ensure_scheduler_state_v2(scheduler_state)
+    active = scheduler_state.get("scheduler_claim")
+    if not isinstance(active, dict) or active.get("action_id") != action_id:
+        completed = _runtime_completion(scheduler_state, action_id)
+        if isinstance(completed, dict) and completed.get("outcome") == "reconciled":
+            return {
+                "classification": "AUTHORIZED_RUNTIME_COMPLETION_ALREADY_RECONCILED",
+                "action_id": action_id,
+                "deduplicated": True,
+            }
+        raise ProtocolError("exact authorized runtime reconciliation claim is required")
+    action = active.get("action", {})
+    if action.get("kind") != "reconcile_authorized_runtime_completion":
+        raise ProtocolError("claimed action is not runtime completion reconciliation")
+    runtime_payload = action.get("payload", {}).get("runtime_action", {})
+    record = _authorized_runtime_record(
+        coordinator_state, str(runtime_payload.get("runtime_action_id") or "")
+    )
+    validate_authorized_runtime_action(record)
+    if runtime_payload.get("identity_sha256") != record["identity_sha256"]:
+        raise ProtocolError("runtime reconciliation identity mismatch")
+    completion_ref = action.get("payload", {}).get("completed_action", {})
+    completed_action_id = str(completion_ref.get("action_id") or "")
+    completion = _runtime_completion(scheduler_state, completed_action_id)
+    if (
+        not isinstance(completion, dict)
+        or completion_ref.get("sha256") != canonical_json_hash(completion)
+        or completion_ref.get("outcome") != completion.get("outcome")
+        or str(completion_ref.get("evidence") or "")
+        != str(completion.get("evidence") or "")
+    ):
+        raise ProtocolError("runtime reconciliation completion identity mismatch")
+    if dry_run:
+        return {
+            "classification": "AUTHORIZED_RUNTIME_COMPLETION_RECONCILE_DRY_RUN",
+            "action_id": action_id,
+            "completed_action_id": completed_action_id,
+            "would_mutate": False,
+        }
+    _apply_authorized_runtime_completion(
+        coordinator_state,
+        {"action": copy.deepcopy(completion.get("action"))},
+        completed_action_id,
+        str(completion.get("outcome") or ""),
+        completion.get("evidence"),
+    )
+    if not _runtime_completion_applied(record, completion):
+        raise ProtocolError("runtime completion reconciliation did not converge")
+    complete_coordinator_action(
+        scheduler_state,
+        action_id,
+        "reconciled",
+        evidence=str(completion.get("evidence") or ""),
+    )
+    if persist_state is not None:
+        persist_state()
+    return {
+        "classification": "AUTHORIZED_RUNTIME_COMPLETION_RECONCILED",
+        "action_id": action_id,
+        "completed_action_id": completed_action_id,
+        "runtime_action_id": record["runtime_action_id"],
+        "phase": record["phase"],
+        "deduplicated": False,
+    }
 
 
 def claim_coordinator_action(
@@ -3811,12 +5841,484 @@ def mark_coordinator_action_sent(
     }
 
 
+def _validate_authorized_runtime_probe_evidence(
+    record: dict[str, Any], action_id: str, outcome: str, evidence: str | None
+) -> dict[str, Any]:
+    if str(evidence or "") != record["recovery_receipt_path"]:
+        raise ProtocolError(
+            "authorized runtime probe requires the exact recovery receipt"
+        )
+    receipt_path = Path(record["recovery_receipt_path"])
+    if not receipt_path.is_file():
+        raise ProtocolError("authorized runtime probe receipt is missing")
+    receipt = load_json(receipt_path)
+    exact_values = {
+        "runtime_action_id": record["runtime_action_id"],
+        "identity_sha256": record["identity_sha256"],
+        "authorization_id": record["authorization_id"],
+        "authorization_action_id": record["authorization_action_id"],
+        "authorization_payload_sha256": record[
+            "authorization_payload_sha256"
+        ],
+    }
+    for field, expected in exact_values.items():
+        if receipt.get(field) != expected:
+            raise ProtocolError(f"runtime probe receipt {field} mismatch")
+    if receipt.get("authority_consumed") is not True:
+        raise ProtocolError("runtime probe receipt must show consumed authority")
+    original = receipt.get("original_target", {})
+    if not isinstance(original, dict) or any(
+        original.get(field) != expected
+        for field, expected in {
+            "path": record["target_path"],
+            "size": record["target_pre_size"],
+            "sha256": record["target_pre_sha256"],
+            "content_class": "all_nul_bytes",
+        }.items()
+    ):
+        raise ProtocolError("runtime probe receipt original target mismatch")
+    for field in ("backup", "quarantine"):
+        preserved = receipt.get(field, {})
+        expected_path = record[f"{field}_path"]
+        if not isinstance(preserved, dict) or (
+            preserved.get("path") != expected_path
+            or preserved.get("exists") is not True
+            or preserved.get("is_file") is not True
+            or preserved.get("size") != record["target_pre_size"]
+            or preserved.get("sha256") != record["target_pre_sha256"]
+            or preserved.get("content_class") != "all_nul_bytes"
+            or preserved.get("expected_identity_match") is not True
+            or not Path(expected_path).is_file()
+            or Path(expected_path).stat().st_size != record["target_pre_size"]
+            or sha256_file(expected_path) != record["target_pre_sha256"]
+        ):
+            raise ProtocolError(f"runtime probe receipt {field} mismatch")
+    mutation_counts = receipt.get("mutation_counts")
+    if mutation_counts != {
+        "acl": 0,
+        "ownership": 0,
+        "os_policy": 0,
+        "execution_policy": 0,
+    }:
+        raise ProtocolError("runtime probe receipt reports forbidden mutation")
+    if receipt.get("product_resume_readiness") != "NOT_YET_SATISFIED":
+        raise ProtocolError(
+            "Worker receipt cannot clear product resume readiness"
+        )
+    if "execution_surface" in receipt:
+        raise ProtocolError("runtime probe receipt uses ambiguous execution surface")
+    if (
+        receipt.get("repair_execution_surface")
+        != AUTHORIZED_RUNTIME_REPAIR_EXECUTION_SURFACE
+    ):
+        raise ProtocolError("runtime probe receipt repair execution surface mismatch")
+    if (
+        receipt.get("probe_execution_surface")
+        != AUTHORIZED_RUNTIME_PROBE_EXECUTION_SURFACE
+    ):
+        raise ProtocolError("runtime probe receipt probe execution surface mismatch")
+    if receipt.get("rollback_performed") is not False:
+        raise ProtocolError("Worker probe receipt cannot claim local rollback")
+
+    early_failures = {"delivery_failed", "task_start_failed"}
+    expected_phase = (
+        "REPAIR_PREPARED" if outcome in early_failures else "WORKER_PROBE_RESULT"
+    )
+    if receipt.get("phase") != expected_phase:
+        raise ProtocolError("runtime probe receipt phase mismatch")
+    if outcome not in early_failures:
+        if receipt.get("probe_action_id") != action_id:
+            raise ProtocolError("runtime probe receipt action identity mismatch")
+    probe_a = receipt.get("probe_a", {})
+    postcheck = receipt.get("postcheck", {})
+    probe_b = receipt.get("probe_b", {})
+    doctor = receipt.get("runtime_doctor", {})
+    statuses = (
+        probe_a.get("status") if isinstance(probe_a, dict) else None,
+        postcheck.get("status") if isinstance(postcheck, dict) else None,
+        probe_b.get("status") if isinstance(probe_b, dict) else None,
+        doctor.get("status") if isinstance(doctor, dict) else None,
+    )
+    allowed_statuses = {
+        "delivery_failed": {("pending", "pending", "pending", "pending")},
+        "task_start_failed": {("pending", "pending", "pending", "pending")},
+        "regeneration_failed": {("passed", "failed", "not_started", "not_started")},
+        "postcheck_failed": {("passed", "failed", "not_started", "not_started")},
+        "probe_a_failed": {("failed", "not_started", "not_started", "not_started")},
+        "probe_b_failed": {("passed", "passed", "failed", "not_started")},
+        "runtime_doctor_failed": {("passed", "passed", "passed", "failed")},
+        "probe_passed": {("passed", "passed", "passed", "passed")},
+    }
+    if statuses not in allowed_statuses.get(outcome, set()):
+        raise ProtocolError("runtime probe receipt phase ordering mismatch")
+
+    probe_contract = _fixed_runtime_probe_contract(record)
+
+    def validate_process_step(
+        step: dict[str, Any], contract: dict[str, Any], label: str
+    ) -> None:
+        status = str(step.get("status") or "")
+        if status in {"pending", "not_started"}:
+            return
+        if step.get("cwd") != contract["cwd"] or step.get("argv") != contract["argv"]:
+            raise ProtocolError(f"runtime {label} exact cwd/argv mismatch")
+        if step.get("sandbox_mode") != "restricted_workspace_write":
+            raise ProtocolError(f"runtime {label} sandbox mode mismatch")
+        exit_code = step.get("exit_code")
+        helper_error = step.get("helper_error")
+        if status == "passed":
+            if exit_code != 0 or helper_error not in (None, ""):
+                raise ProtocolError(f"runtime {label} pass lacks clean exit 0")
+        elif status == "failed":
+            if not (
+                (isinstance(exit_code, int) and exit_code != 0)
+                or (isinstance(helper_error, str) and helper_error.strip())
+            ):
+                raise ProtocolError(f"runtime {label} failure lacks exit/error evidence")
+        else:
+            raise ProtocolError(f"runtime {label} status is unsupported")
+
+    validate_process_step(probe_a, probe_contract["probe_a"], "probe_a")
+    validate_process_step(probe_b, probe_contract["probe_b"], "probe_b")
+
+    post_status = str(postcheck.get("status") or "")
+    if post_status in {"passed", "failed"}:
+        checks = postcheck.get("checks")
+        if postcheck.get("path") != record["target_path"] or not isinstance(
+            checks, dict
+        ) or set(checks) != {"exists", "nonempty", "not_nul_only", "valid_json"}:
+            raise ProtocolError("runtime postcheck evidence shape mismatch")
+        if any(not isinstance(value, bool) for value in checks.values()):
+            raise ProtocolError("runtime postcheck checks must be boolean")
+        if post_status == "passed" and not all(checks.values()):
+            raise ProtocolError("runtime postcheck pass has a failed check")
+        if post_status == "failed" and (
+            all(checks.values())
+            or not isinstance(postcheck.get("error"), str)
+            or not postcheck["error"].strip()
+        ):
+            raise ProtocolError("runtime postcheck failure lacks exact evidence")
+
+    if outcome == "probe_a_failed":
+        regenerated = receipt.get("regenerated_state", {})
+        target = Path(record["target_path"])
+        if target.exists() and not target.is_file():
+            raise ProtocolError("probe_a failure target exists but is not a file")
+        if target.is_file():
+            try:
+                json.loads(target.read_text(encoding="utf-8"))
+                actual_parse_result = "valid"
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                actual_parse_result = "invalid"
+            if (
+                not isinstance(regenerated, dict)
+                or regenerated.get("path") != record["target_path"]
+                or regenerated.get("exists") is not True
+                or regenerated.get("size") != target.stat().st_size
+                or regenerated.get("sha256") != sha256_file(target)
+                or regenerated.get("json_parse_result") != actual_parse_result
+            ):
+                raise ProtocolError(
+                    "probe_a failure lacks exact regenerated-state identity"
+                )
+        elif not isinstance(regenerated, dict) or any(
+            regenerated.get(field) != expected
+            for field, expected in {
+                "path": record["target_path"],
+                "exists": False,
+                "size": None,
+                "sha256": None,
+                "json_parse_result": "absent",
+            }.items()
+        ):
+            raise ProtocolError(
+                "probe_a failure requires explicit absent regenerated state"
+            )
+
+    if outcome in {"probe_b_failed", "runtime_doctor_failed", "probe_passed"}:
+        regenerated = receipt.get("regenerated_state", {})
+        target = Path(record["target_path"])
+        if (
+            not isinstance(regenerated, dict)
+            or regenerated.get("path") != record["target_path"]
+            or not isinstance(regenerated.get("size"), int)
+            or regenerated["size"] <= 0
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", str(regenerated.get("sha256") or "")
+            )
+            or regenerated.get("json_parse_result") != "valid"
+            or not target.is_file()
+            or target.stat().st_size != regenerated["size"]
+            or sha256_file(target) != regenerated["sha256"]
+            or regenerated["sha256"] == record["target_pre_sha256"]
+        ):
+            raise ProtocolError("runtime probe regenerated state proof is invalid")
+        try:
+            json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ProtocolError("runtime probe regenerated state is not valid JSON") from exc
+
+    if outcome == "postcheck_failed":
+        regenerated = receipt.get("regenerated_state", {})
+        target = Path(record["target_path"])
+        if (
+            not isinstance(regenerated, dict)
+            or regenerated.get("path") != record["target_path"]
+            or regenerated.get("json_parse_result") != "invalid"
+            or not target.is_file()
+            or regenerated.get("size") != target.stat().st_size
+            or regenerated.get("sha256") != sha256_file(target)
+        ):
+            raise ProtocolError("failed postcheck lacks exact invalid-state identity")
+    if outcome == "regeneration_failed":
+        regenerated = receipt.get("regenerated_state", {})
+        if (
+            not isinstance(regenerated, dict)
+            or regenerated.get("path") != record["target_path"]
+            or regenerated.get("status") != "failed"
+            or not isinstance(regenerated.get("error"), str)
+            or not regenerated["error"].strip()
+        ):
+            raise ProtocolError("regeneration failure lacks exact error evidence")
+
+    expected_doctor = probe_contract["runtime_doctor"]["expected"]
+    if outcome in {"runtime_doctor_failed", "probe_passed"}:
+        if not isinstance(doctor, dict) or doctor.get("expected") != expected_doctor:
+            raise ProtocolError("runtime doctor expected identity mismatch")
+    if outcome == "probe_passed" and doctor.get("observed") != expected_doctor:
+        raise ProtocolError("runtime doctor success lacks exact observed identity")
+    if outcome == "probe_passed" and doctor.get("error") not in (None, ""):
+        raise ProtocolError("runtime doctor pass contains an error")
+    if outcome == "runtime_doctor_failed" and (
+        not isinstance(doctor.get("observed"), dict)
+        or not isinstance(doctor.get("error"), str)
+        or not doctor["error"].strip()
+    ):
+        raise ProtocolError("runtime doctor failure lacks observed/error evidence")
+    return receipt
+
+
+def _validate_authorized_runtime_supervisor_evidence(
+    record: dict[str, Any], outcome: str, evidence: str | None
+) -> dict[str, Any]:
+    if outcome not in {"accepted", "rejected", "reconcile"}:
+        raise ProtocolError("runtime Supervisor outcome is not structured")
+    evidence_path = Path(str(evidence or ""))
+    if not evidence_path.is_file():
+        raise ProtocolError("runtime Supervisor result evidence is missing")
+    result = load_json(evidence_path)
+    expected = {
+        "event_kind": "SUPERVISOR_RUNTIME_RECOVERY_VERDICT",
+        "disposition": outcome,
+        "repository_id": record["repository_id"],
+        "mission_id": record["mission_id"],
+        "attempt_id": record["attempt_id"],
+        "supervisor_thread_id": record["supervisor_thread_id"],
+        "runtime_action_id": record["runtime_action_id"],
+        "runtime_identity_sha256": record["identity_sha256"],
+        "authorization_id": record["authorization_id"],
+        "recovery_receipt_sha256": sha256_file(
+            record["recovery_receipt_path"]
+        ),
+    }
+    for field, value in expected.items():
+        if str(result.get(field) or "") != str(value):
+            raise ProtocolError(f"runtime Supervisor evidence {field} mismatch")
+    readiness = str(result.get("product_resume_readiness") or "")
+    if outcome == "accepted":
+        if readiness != "ELIGIBLE_FOR_LATER_SUPERVISOR_WORK_ORDER":
+            raise ProtocolError("accepted runtime result has invalid resume readiness")
+    elif readiness != "NOT_YET_SATISFIED":
+        raise ProtocolError("non-accepted runtime result cannot clear resume readiness")
+    return {
+        "disposition": outcome,
+        "evidence_path": str(evidence_path.resolve(strict=False)),
+        "evidence_sha256": sha256_file(evidence_path),
+        "product_resume_readiness": readiness,
+        "recorded_at": utc_now(),
+    }
+
+
+def _apply_authorized_runtime_completion(
+    coordinator_state: dict[str, Any],
+    active: dict[str, Any],
+    action_id: str,
+    outcome: str,
+    evidence: str | None,
+) -> None:
+    action = active.get("action", {})
+    kind = str(action.get("kind") or "")
+    if kind not in AUTHORIZED_RUNTIME_ACTION_KINDS:
+        return
+    record = _runtime_action_from_scheduler_record(active, coordinator_state)
+    if kind == "execute_authorized_runtime_repair":
+        if outcome == "precondition_mismatch":
+            if record["phase"] in {"AUTHORIZED", "EFFECT_INTENT"}:
+                if record.get("authority_consumed") is True:
+                    raise ProtocolError("runtime precondition mismatch consumed authority")
+                record["phase"] = "RESULT_READY"
+                record["recovery_result"] = {
+                    "classification": "AUTHORIZED_RUNTIME_PRECONDITION_MISMATCH",
+                    "authority_consumed": False,
+                    "target_mutated": False,
+                }
+                _write_authorized_runtime_receipt(
+                    record, "PRECONDITION_MISMATCH"
+                )
+            if record["phase"] not in {"RESULT_READY", "COMPLETE"} or record[
+                "authority_consumed"
+            ]:
+                raise ProtocolError("invalid runtime precondition-mismatch completion")
+        elif outcome == "repair_prepared":
+            if record["phase"] in {
+                "AUTHORIZED",
+                "EFFECT_INTENT",
+                "EFFECT_PREPARED",
+            }:
+                backup = Path(record["backup_path"])
+                quarantine = Path(record["quarantine_path"])
+                if not all(
+                    path.is_file()
+                    and path.stat().st_size == record["target_pre_size"]
+                    and sha256_file(path) == record["target_pre_sha256"]
+                    for path in (backup, quarantine)
+                ):
+                    raise ProtocolError(
+                        "completed runtime repair lacks byte-exact preserved state"
+                    )
+                record["authority_consumed"] = True
+                record["phase"] = "REPAIR_PREPARED"
+                _write_authorized_runtime_receipt(record, "REPAIR_PREPARED")
+            if record["phase"] not in {
+                "REPAIR_PREPARED",
+                "ROLLBACK_REQUIRED",
+                "RESULT_READY",
+                "COMPLETE",
+            } or not record["authority_consumed"]:
+                raise ProtocolError("runtime repair completion lacks prepared effect")
+        else:
+            raise ProtocolError("invalid authorized runtime repair outcome")
+        return
+    if kind == "rollback_authorized_runtime_repair":
+        if outcome == "rolled_back" and record["phase"] == "ROLLBACK_REQUIRED":
+            target = Path(record["target_path"])
+            backup = Path(record["backup_path"])
+            quarantine = Path(record["quarantine_path"])
+            if not _runtime_target_matches_precondition(record) or not all(
+                path.is_file()
+                and sha256_file(path) == record["target_pre_sha256"]
+                for path in (backup, quarantine)
+            ):
+                raise ProtocolError(
+                    "completed runtime rollback lacks byte-exact restored state"
+                )
+            record["phase"] = "RESULT_READY"
+            record["recovery_result"] = {
+                "classification": "CODEX_SANDBOX_STATE_REPAIR_FAILED",
+                "authority_consumed": True,
+                "rolled_back": True,
+                "target_sha256": sha256_file(target),
+                "probe_result": copy.deepcopy(record.get("probe_result")),
+            }
+            _write_authorized_runtime_receipt(record, "ROLLBACK_COMPLETE")
+        if outcome != "rolled_back" or record["phase"] not in {
+            "RESULT_READY",
+            "COMPLETE",
+        }:
+            raise ProtocolError("invalid authorized runtime rollback outcome")
+        return
+    if kind == "probe_authorized_runtime_repair":
+        rollback_outcomes = {
+            "delivery_failed",
+            "task_start_failed",
+            "regeneration_failed",
+            "postcheck_failed",
+            "probe_a_failed",
+        }
+        retained_state_outcomes = {
+            "probe_b_failed",
+            "runtime_doctor_failed",
+            "probe_passed",
+        }
+        if outcome not in rollback_outcomes | retained_state_outcomes:
+            raise ProtocolError("authorized runtime probe outcome is not structured")
+        receipt = _validate_authorized_runtime_probe_evidence(
+            record, action_id, outcome, evidence
+        )
+        existing_probe = record.get("probe_result")
+        if isinstance(existing_probe, dict):
+            if (
+                existing_probe.get("action_id") != action_id
+                or existing_probe.get("outcome") != outcome
+                or str(existing_probe.get("evidence") or "")
+                != str(evidence or "")
+            ):
+                raise ProtocolError("conflicting authorized runtime probe replay")
+            return
+        record["probe_result"] = {
+            "action_id": action_id,
+            "outcome": outcome,
+            "evidence": evidence,
+            "evidence_sha256": sha256_file(record["recovery_receipt_path"]),
+            "receipt_phase": receipt.get("phase"),
+            "recorded_at": utc_now(),
+        }
+        if outcome == "probe_passed":
+            record["phase"] = "RESULT_READY"
+            record["recovery_result"] = {
+                "classification": "CODEX_SANDBOX_STATE_REPAIR_SUCCEEDED",
+                "authority_consumed": True,
+                "rolled_back": False,
+                "probe_result": copy.deepcopy(record["probe_result"]),
+            }
+        elif outcome in rollback_outcomes:
+            record["phase"] = "ROLLBACK_REQUIRED"
+        else:
+            classification = (
+                "CWD_OR_PATH_SCOPED_SANDBOX_FAILURE"
+                if outcome == "probe_b_failed"
+                else "SANDBOX_RECOVERED_RUNTIME_READINESS_FAILED"
+            )
+            record["phase"] = "RESULT_READY"
+            record["recovery_result"] = {
+                "classification": classification,
+                "authority_consumed": True,
+                "rolled_back": False,
+                "regenerated_state_retained": True,
+                "probe_result": copy.deepcopy(record["probe_result"]),
+            }
+        return
+    if kind == "return_authorized_runtime_recovery_result":
+        if not isinstance(record.get("recovery_result"), dict):
+            raise ProtocolError("runtime Supervisor return lacks recovery_result")
+        if record["phase"] == "COMPLETE":
+            existing_result = record.get("supervisor_result")
+            if not isinstance(existing_result, dict) or (
+                existing_result.get("disposition") != outcome
+                or _normalized_absolute_path(existing_result.get("evidence_path", ""))
+                != _normalized_absolute_path(str(evidence or ""))
+            ):
+                raise ProtocolError("conflicting runtime Supervisor result replay")
+            return
+        if record["phase"] != "RESULT_READY":
+            raise ProtocolError("runtime Supervisor return is out of phase")
+        record["supervisor_result"] = (
+            _validate_authorized_runtime_supervisor_evidence(
+                record, outcome, evidence
+            )
+        )
+        record["phase"] = "COMPLETE"
+        record["completed_at"] = utc_now()
+        return
+
+
 def complete_coordinator_action(
     scheduler_state: dict[str, Any],
     action_id: str,
     outcome: str,
     *,
     evidence: str | None = None,
+    coordinator_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _ensure_scheduler_state_v2(scheduler_state)
     active = scheduler_state.get("scheduler_claim")
@@ -3840,6 +6342,23 @@ def complete_coordinator_action(
                 != str(evidence or "")
             ):
                 raise ProtocolError("conflicting completed action replay")
+            completed_action = existing_completion.get("action")
+            if (
+                isinstance(completed_action, dict)
+                and completed_action.get("kind") in AUTHORIZED_RUNTIME_ACTION_KINDS
+            ):
+                if coordinator_state is None:
+                    raise ProtocolError(
+                        "authorized runtime completion replay requires Coordinator state"
+                    )
+                replay_active = {"action": completed_action}
+                _apply_authorized_runtime_completion(
+                    coordinator_state,
+                    replay_active,
+                    action_id,
+                    outcome,
+                    evidence,
+                )
             return {
                 "classification": "COORDINATOR_ACTION_ALREADY_COMPLETED",
                 "action_id": action_id,
@@ -3850,6 +6369,13 @@ def complete_coordinator_action(
     requires_external_result = (
         active.get("action", {}).get("requires_external_result") is True
     )
+    action_kind = str(active.get("action", {}).get("kind") or "")
+    if action_kind in AUTHORIZED_RUNTIME_ACTION_KINDS:
+        if coordinator_state is None:
+            raise ProtocolError(
+                "authorized runtime completion requires Coordinator state"
+            )
+        validate_coordinator_state(coordinator_state)
     if requires_external_result and source != "route_lease":
         raise ProtocolError(
             "external Coordinator action cannot complete before exact send receipt"
@@ -3858,9 +6384,48 @@ def complete_coordinator_action(
         raise ProtocolError(
             "external Coordinator action completion requires result evidence"
         )
+    if action_kind in AUTHORIZED_RUNTIME_LOCAL_ACTION_KINDS:
+        runtime_record = _runtime_action_from_scheduler_record(
+            active, coordinator_state or {}
+        )
+        if str(evidence or "") != runtime_record["recovery_receipt_path"]:
+            raise ProtocolError(
+                "authorized runtime local completion requires exact effect receipt"
+            )
+        receipt_path = Path(runtime_record["recovery_receipt_path"])
+        if not receipt_path.is_file():
+            raise ProtocolError(
+                "authorized runtime local completion receipt is missing"
+            )
+        receipt = load_json(receipt_path)
+        if receipt.get("identity_sha256") != runtime_record["identity_sha256"]:
+            raise ProtocolError(
+                "authorized runtime local completion receipt identity mismatch"
+            )
+        status = str(active.get("status") or "claimed")
+        if outcome == "precondition_mismatch":
+            if status not in {"claimed", "effect_prepared"} or runtime_record[
+                "authority_consumed"
+            ]:
+                raise ProtocolError(
+                    "precondition mismatch must precede effect preparation"
+                )
+        elif status != "effect_prepared":
+            raise ProtocolError(
+                "authorized runtime local effect must be prepared before completion"
+            )
+    if coordinator_state is not None:
+        _apply_authorized_runtime_completion(
+            coordinator_state, active, action_id, outcome, evidence
+        )
     record = {
         "action_id": action_id,
         "kind": active.get("action", {}).get("kind"),
+        "action": (
+            copy.deepcopy(active.get("action"))
+            if action_kind in AUTHORIZED_RUNTIME_ACTION_KINDS
+            else None
+        ),
         "requires_external_result": requires_external_result,
         "state_fingerprint": active.get("state_fingerprint"),
         "outcome": outcome,
@@ -5843,6 +8408,18 @@ def migrate_coordinator_ux(
     migrated_state.setdefault("active_repository_selector", None)
     migrated_state.setdefault("pending_repository_ids", [])
     migrated_state.setdefault("pending_user_responses", [])
+    migrated_state.setdefault("authorized_runtime_actions", [])
+    presentation_policy = migrated_state.setdefault("presentation_policy", {})
+    if not isinstance(presentation_policy, dict):
+        raise ProtocolError("presentation_policy must be an object")
+    if presentation_policy.get("automation_arm_condition") in {
+        None,
+        "external_active_claim_or_exact_outbound_wait",
+        "external_scheduler_claim_or_route_leases",
+    }:
+        presentation_policy["automation_arm_condition"] = (
+            "external_route_or_recovery_owned_runtime_phase"
+        )
     migrated_state.setdefault("coordinator_task", {})
     migrated_state["coordinator_task"].setdefault("scope", "all_repositories")
     migrated_state["coordinator_task"].setdefault("task_id", None)
@@ -6006,6 +8583,28 @@ def validate_coordinator_state(state: dict[str, Any]) -> None:
             if not str(item.get("repository_id") or ""):
                 raise ProtocolError(f"{label}[{index}] requires repository_id")
             seen_event_ids.add(event_id)
+    runtime_actions = state.get("authorized_runtime_actions", [])
+    if not isinstance(runtime_actions, list):
+        raise ProtocolError("authorized_runtime_actions must be a list")
+    seen_runtime_action_ids: set[str] = set()
+    seen_runtime_identity_hashes: set[str] = set()
+    for index, item in enumerate(runtime_actions):
+        try:
+            validate_authorized_runtime_action(item)
+        except ProtocolError as exc:
+            raise ProtocolError(
+                f"authorized_runtime_actions[{index}]: {exc}"
+            ) from exc
+        action_id = str(item["runtime_action_id"])
+        identity_sha = str(item["identity_sha256"])
+        if action_id in seen_runtime_action_ids:
+            raise ProtocolError(f"duplicate authorized runtime action: {action_id}")
+        if identity_sha in seen_runtime_identity_hashes:
+            raise ProtocolError(
+                f"duplicate authorized runtime identity: {identity_sha}"
+            )
+        seen_runtime_action_ids.add(action_id)
+        seen_runtime_identity_hashes.add(identity_sha)
     presentation = state.get("presentation_policy", {})
     if presentation.get("global_completion_barrier") is True:
         raise ProtocolError("global completion barrier is forbidden")
@@ -6021,6 +8620,7 @@ def validate_coordinator_state(state: dict[str, Any]) -> None:
         None,
         "external_active_claim_or_exact_outbound_wait",
         "external_scheduler_claim_or_route_leases",
+        "external_route_or_recovery_owned_runtime_phase",
     }:
         raise ProtocolError("recovery automation has an unsafe arm condition")
     if presentation.get("cycle_mode") not in {None, "event_driven_drain"}:
@@ -6443,6 +9043,7 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator_complete.add_argument(
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
+    coordinator_complete.add_argument("--coordinator-state", type=Path)
     coordinator_complete.add_argument("--dry-run", action="store_true")
 
     coordinator_release = sub.add_parser("coordinator-action-release")
@@ -6452,6 +9053,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
     )
     coordinator_release.add_argument("--dry-run", action="store_true")
+
+    runtime_register = sub.add_parser("authorized-runtime-action-register")
+    runtime_register.add_argument("--spec", type=Path, required=True)
+    runtime_register.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    runtime_register.add_argument("--registry", type=Path, default=DEFAULT_BINDINGS)
+    runtime_register.add_argument("--hosts", type=Path, default=DEFAULT_HOSTS)
+    runtime_register.add_argument("--adapter", type=Path, default=DEFAULT_ADAPTER)
+    runtime_register.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    runtime_register.add_argument("--dry-run", action="store_true")
+
+    runtime_execute = sub.add_parser("authorized-runtime-action-execute")
+    runtime_execute.add_argument("--action-id", required=True)
+    runtime_execute.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    runtime_execute.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    runtime_execute.add_argument("--dry-run", action="store_true")
+
+    runtime_rollback = sub.add_parser("authorized-runtime-action-rollback")
+    runtime_rollback.add_argument("--action-id", required=True)
+    runtime_rollback.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    runtime_rollback.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    runtime_rollback.add_argument("--dry-run", action="store_true")
+
+    runtime_reconcile = sub.add_parser(
+        "authorized-runtime-action-reconcile-completion"
+    )
+    runtime_reconcile.add_argument("--action-id", required=True)
+    runtime_reconcile.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    runtime_reconcile.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    runtime_reconcile.add_argument("--dry-run", action="store_true")
 
     coordinator_event = sub.add_parser("queue-coordinator-event")
     coordinator_event.add_argument(
@@ -6525,6 +9171,7 @@ def main(argv: list[str] | None = None) -> int:
             registry = load_json(args.registry)
             hosts = load_json(args.hosts)
             adapter = load_json(args.adapter)
+            scheduler_state = load_scheduler_state(args.scheduler_state)
             validate_registry(registry, hosts)
             if args.alias:
                 result = resolve_launch(
@@ -6769,6 +9416,29 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
+        if args.command == "authorized-runtime-action-register":
+            coordinator_state = load_json(args.coordinator_state)
+            registry = load_json(args.registry)
+            hosts = load_json(args.hosts)
+            adapter = load_json(args.adapter)
+            scheduler_state = load_scheduler_state(args.scheduler_state)
+            validate_coordinator_state(coordinator_state)
+            validate_registry(registry, hosts)
+            result = register_authorized_runtime_action(
+                coordinator_state,
+                load_json(args.spec),
+                registry=registry,
+                hosts=hosts,
+                adapter=adapter,
+                scheduler_state=scheduler_state,
+            )
+            validate_coordinator_state(coordinator_state)
+            if not args.dry_run:
+                atomic_write_json(args.coordinator_state, coordinator_state)
+            result["dry_run"] = bool(args.dry_run)
+            _json_stdout(result)
+            return 0
+
         if args.command == "mission-init":
             mission = new_mission(load_json(args.payload))
             path = _mission_path(args.missions_dir, mission)
@@ -6938,14 +9608,71 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "coordinator-action-complete":
             scheduler_state = load_scheduler_state(args.scheduler_state)
+            coordinator_state = (
+                load_json(args.coordinator_state)
+                if args.coordinator_state is not None
+                else None
+            )
+            if coordinator_state is not None:
+                validate_coordinator_state(coordinator_state)
             result = complete_coordinator_action(
                 scheduler_state,
                 args.action_id,
                 args.outcome,
                 evidence=args.evidence,
+                coordinator_state=coordinator_state,
             )
             if not args.dry_run:
+                if coordinator_state is not None:
+                    validate_coordinator_state(coordinator_state)
+                    atomic_write_json(args.coordinator_state, coordinator_state)
                 atomic_write_json(args.scheduler_state, scheduler_state)
+            result["dry_run"] = bool(args.dry_run)
+            _json_stdout(result)
+            return 0
+
+
+        if args.command in {
+            "authorized-runtime-action-execute",
+            "authorized-runtime-action-rollback",
+            "authorized-runtime-action-reconcile-completion",
+        }:
+            coordinator_state = load_json(args.coordinator_state)
+            scheduler_state = load_scheduler_state(args.scheduler_state)
+            validate_coordinator_state(coordinator_state)
+
+            def persist_runtime_state() -> None:
+                validate_scheduler_state(scheduler_state)
+                validate_coordinator_state(coordinator_state)
+                atomic_write_json(args.coordinator_state, coordinator_state)
+                atomic_write_json(args.scheduler_state, scheduler_state)
+
+            if args.command == "authorized-runtime-action-execute":
+                result = execute_authorized_runtime_action(
+                    coordinator_state,
+                    scheduler_state,
+                    args.action_id,
+                    dry_run=args.dry_run,
+                    persist_state=(None if args.dry_run else persist_runtime_state),
+                )
+            elif args.command == "authorized-runtime-action-rollback":
+                result = rollback_authorized_runtime_action(
+                    coordinator_state,
+                    scheduler_state,
+                    args.action_id,
+                    dry_run=args.dry_run,
+                    persist_state=(None if args.dry_run else persist_runtime_state),
+                )
+            else:
+                result = reconcile_authorized_runtime_completion(
+                    coordinator_state,
+                    scheduler_state,
+                    args.action_id,
+                    dry_run=args.dry_run,
+                    persist_state=(None if args.dry_run else persist_runtime_state),
+                )
+            if not args.dry_run:
+                persist_runtime_state()
             result["dry_run"] = bool(args.dry_run)
             _json_stdout(result)
             return 0

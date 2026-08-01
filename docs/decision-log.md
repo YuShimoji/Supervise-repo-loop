@@ -259,3 +259,17 @@
   runtime. An old or narrowed view can be audited or reconciled but cannot
   dispatch work, adjudicate current state, or appear as the current portfolio
   roadmap.
+
+## D-023 — Preserve control-plane waits during context reconciliation
+
+- Date: 2026-08-02
+- Corrects: portfolio v4 migration forcing every unverified project row to
+  `READY`, which made a valid `WAITING_USER` plan and complete user card
+  unrenderable.
+- Decision: missing or stale project context invalidates only ordinary
+  `RUNNING`/`READY` work. Preserve exact user waits, external route waits,
+  blocker/policy parks, and terminal states while replacing the uncertified
+  roadmap with the reconciliation projection. Continue to require a complete
+  top-level card for every presented `WAITING_USER` row.
+- Effect: the renderer can publish the deterministic plan without allowing
+  ordinary work from an uncertified context or hiding an actionable user card.

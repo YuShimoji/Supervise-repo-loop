@@ -2507,14 +2507,20 @@ def migrate_portfolio_to_project_context_v4(
                 else None
             )
             row["project_context"] = None
-            row["state"] = "READY"
-            row["why"] = (
-                "The project-wide current context is missing or stale."
-            )
-            row["next_move"] = (
-                "Reconcile the project context against every active lane and "
-                "the current authority observation."
-            )
+            # Context reconciliation invalidates ordinary running/ready work,
+            # but it must not erase a durable user/external wait, stop, or
+            # terminal state already projected by the deterministic plan.
+            # Those control-plane states remain actionable while ordinary work
+            # is gated and must stay aligned with next_user_action/routes.
+            if row.get("state") in {"RUNNING", "READY"}:
+                row["state"] = "READY"
+                row["why"] = (
+                    "The project-wide current context is missing or stale."
+                )
+                row["next_move"] = (
+                    "Reconcile the project context against every active lane and "
+                    "the current authority observation."
+                )
             row["roadmap"] = {
                 "overall_position": "project context reconciliation",
                 "current_block": "verify the current project position",

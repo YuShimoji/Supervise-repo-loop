@@ -99,6 +99,13 @@ context events; this repair task does not infer or initialize them.
 
 ## Acceptance state
 
+- 2026-08-02 WAITING_USER renderer correction: project-context migration now
+  preserves user/external waits, parks, blockers, and terminal states while
+  gating only ordinary `RUNNING`/`READY` work. The revision-194-shaped
+  synthetic regression and all 180 source/installed tests passed; the static
+  allowlist passed SHA-256 readback without synchronizing live `state/`. The
+  exact primary Coordinator must regenerate the live portfolio from revision
+  194 before the checkpoint is publishable.
 - 2026-08-02 project-context frontier installed checkpoint: the generic
   seven-project canary covers four existing-project migration shapes plus new
   web, game, and media registrations through one contract. All 179 source and

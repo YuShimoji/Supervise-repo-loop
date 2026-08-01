@@ -126,6 +126,15 @@ row also carries a real stop contract, it is validated but remains secondary to
 the exact route identity. The graph renders normal external waits in blue,
 user/review waits and policy parks in amber, and only system blockers in red.
 
+Project-context reconciliation gates ordinary work; it does not erase a
+durable control-plane state. When a row lacks a current ProjectContextRecord,
+the v4 migration changes `RUNNING` or an ordinary `READY` row to reconciliation
+`READY`, but preserves `WAITING_USER`, `WAITING_EXTERNAL`, blocker/policy parks,
+and terminal states. A preserved `WAITING_USER` row must still identify the
+same complete top-level `next_user_action`. This keeps the renderer aligned
+with the deterministic plan while the project-wide roadmap remains explicitly
+uncertified.
+
 ## User input and proposal lineage
 
 Top-level `next_user_action` is either `null` or the one complete card the user

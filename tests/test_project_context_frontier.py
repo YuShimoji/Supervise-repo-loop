@@ -651,6 +651,60 @@ class ProjectContextFrontierTests(unittest.TestCase):
                 portfolio, context, frontier, [signal]
             )
 
+    def test_PC_PORTFOLIO_02_unverified_context_preserves_waiting_user(self) -> None:
+        first_frontier = frontier_event(
+            epoch=1,
+            based_on=0,
+            artifact_id="artifact-current",
+            actor="supervisor",
+            token="portfolio-waiting-user",
+        )
+        frontier = loop.default_frontier_state([REPO_A])
+        loop.apply_frontier_event(frontier, first_frontier)
+        signal = authority_signal(first_frontier)
+        context = loop.default_project_context_state([REPO_A])
+        portfolio = portfolio_v2()
+        portfolio["execution_state"] = "WAITING_USER"
+        portfolio["active_route_count"] = 0
+        portfolio["active_routes"] = []
+        portfolio["next_user_action"] = {
+            "repository_id": REPO_A,
+            "kind": "USER_ACTION",
+            "purpose": "Supply the exact current source bytes.",
+            "why_now": "The exact Mission is parked for user input.",
+            "entrypoint": "This Coordinator task",
+            "requirements": ["Attach one exact source file or paste its text."],
+            "reply_format": "Attach the file or paste the text.",
+            "owner": "User",
+            "post_reply_behavior": "Resume only the exact parked Mission.",
+            "non_escalation_boundary": "Do not infer missing source content.",
+        }
+        row = portfolio["repositories"][0]
+        row["state"] = "WAITING_USER"
+        row["why"] = "The exact Mission is parked for user input."
+        row["owner"] = "User"
+        row["next_move"] = "Supply the exact current source bytes."
+
+        migrated = loop.migrate_portfolio_to_project_context_v4(
+            portfolio, context, frontier, [signal]
+        )
+
+        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(migrated["execution_state"], "WAITING_USER")
+        self.assertEqual(migrated["repositories"][0]["state"], "WAITING_USER")
+        self.assertEqual(
+            migrated["repositories"][0]["project_context_status"],
+            "legacy_unverified",
+        )
+        self.assertEqual(
+            migrated["repositories"][0]["next_move"],
+            "Supply the exact current source bytes.",
+        )
+        self.assertIn(
+            "Supply the exact current source bytes.",
+            loop.render_portfolio_markdown(migrated),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

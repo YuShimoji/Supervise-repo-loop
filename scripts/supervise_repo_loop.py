@@ -245,6 +245,7 @@ PROTOCOL_HANDOFF_ACTION_KINDS = {
     "await_supervisor_work_order",
     "await_worker_result",
     "return_worker_result",
+    "reconcile_project_context",
     "probe_authorized_runtime_repair",
     "return_authorized_runtime_recovery_result",
 }
@@ -1687,6 +1688,55 @@ def frontier_gate_decision(
         if not isinstance(record, dict):
             reasons.append("missing_frontier")
             raise ProtocolError("missing frontier")
+        if record.get("disposition") == "none":
+            if not isinstance(authority_signal, dict):
+                reasons.append("authority_unverified")
+                raise ProtocolError("authority signal missing")
+            validate_authority_signal_liveness(authority_signal)
+            git = authority_signal.get("git")
+            if not isinstance(git, dict):
+                reasons.append("authority_unverified")
+                raise ProtocolError("authority Git high water missing")
+            if (
+                git.get("branch") != record.get("branch")
+                or git.get("head_sha") != record.get("head_sha")
+            ):
+                reasons.append("authority_changed")
+                raise ProtocolError("none frontier authority changed")
+            applied = next(
+                (
+                    item
+                    for item in state.get("applied_results", [])
+                    if isinstance(item, dict)
+                    and item.get("result_id") == record.get("source_result_id")
+                    and item.get("frontier_event_id")
+                    == record.get("frontier_event_id")
+                ),
+                None,
+            )
+            if not isinstance(applied, dict):
+                # A legacy/direct tombstone still blocks ordinary work, but it
+                # is not the semantic receipt that suppresses reconciliation.
+                # Only a reducer-applied result can certify unchanged absence.
+                return {
+                    "classification": "NO_ACTIVE_CANDIDATE",
+                    "reasons": ["no_candidate", "unbound_none_frontier"],
+                    "certificate": None,
+                    "frontier_event_id": record.get("frontier_event_id"),
+                    "frontier_epoch": record.get("frontier_epoch"),
+                }
+            if applied.get("authority_fingerprint") != authority_signal.get(
+                "authority_fingerprint"
+            ):
+                reasons.append("authority_changed")
+                raise ProtocolError("none frontier authority fingerprint changed")
+            return {
+                "classification": "FRONTIER_RECONCILED_NO_ACTIVE_CANDIDATE",
+                "reasons": ["no_candidate"],
+                "certificate": None,
+                "frontier_event_id": record.get("frontier_event_id"),
+                "frontier_epoch": record.get("frontier_epoch"),
+            }
         if record.get("disposition") not in FRONTIER_ADVANCE_DISPOSITIONS:
             reasons.append(
                 "no_candidate"
@@ -4581,6 +4631,37 @@ def _action_route_class(action: dict[str, Any]) -> str:
     return "execution"
 
 
+def _is_applied_frontier_context_continuation(
+    action: dict[str, Any], scheduler_state: dict[str, Any]
+) -> bool:
+    """Bind a context handoff to the exact frontier result it must continue."""
+    if action.get("kind") != "reconcile_project_context":
+        return False
+    repository_id = _action_repository_id(action)
+    payload = action.get("payload", {})
+    records = payload.get("current_lane_frontiers", []) if isinstance(
+        payload, dict
+    ) else []
+    frontier_event_ids = {
+        str(record.get("frontier_event_id") or "")
+        for record in records
+        if isinstance(record, dict) and record.get("frontier_event_id")
+    }
+    if not repository_id or not frontier_event_ids:
+        return False
+    return any(
+        isinstance(completed, dict)
+        and completed.get("kind") == "reconcile_repository_frontier"
+        and completed.get("repository_id") == repository_id
+        and completed.get("outcome") == "result_applied"
+        and completed.get("external_lifecycle_state") == "result_applied"
+        and isinstance(completed.get("evidence"), dict)
+        and str(completed["evidence"].get("frontier_event_id") or "")
+        in frontier_event_ids
+        for completed in scheduler_state.get("completed_actions", [])
+    )
+
+
 def _action_observer_kind(action: dict[str, Any]) -> str | None:
     payload = action.get("payload", {})
     route = payload.get("route", {}) if isinstance(payload, dict) else {}
@@ -6718,7 +6799,10 @@ def build_coordinator_plan(
                         **copy.deepcopy(decision),
                     }
                 )
-                if decision["classification"] != "FRONTIER_CERTIFIED":
+                if decision["classification"] not in {
+                    "FRONTIER_CERTIFIED",
+                    "FRONTIER_RECONCILED_NO_ACTIVE_CANDIDATE",
+                }:
                     route = _supervisor_reconciliation_route(
                         registry, adapter, repository_id, lane
                     )
@@ -7188,6 +7272,15 @@ def build_coordinator_plan(
                         action, decision["certificate"]
                     )
                 )
+            elif (
+                decision["classification"]
+                == "FRONTIER_RECONCILED_NO_ACTIVE_CANDIDATE"
+                and action.get("kind") == "reconcile_project_context"
+            ):
+                # A reducer-applied `none` result is a resolved frontier. It
+                # authorizes only the mandatory context continuation; absence
+                # alone must never authorize ordinary repository work.
+                gated_candidates.append(action)
             else:
                 frontier_gate_report.append(
                     {
@@ -8597,7 +8690,12 @@ def claim_coordinator_action(
     )
     if not isinstance(next_action, dict) or not isinstance(action, dict):
         raise ProtocolError("scheduler action is stale, capacity-limited, or not next")
-    if action.get("priority") != next_action.get("priority"):
+    if (
+        action.get("priority") != next_action.get("priority")
+        and not _is_applied_frontier_context_continuation(
+            action, scheduler_state
+        )
+    ):
         raise ProtocolError(
             "scheduler action is not in the current highest-priority ready set"
         )
@@ -9961,19 +10059,33 @@ def _refresh_portfolio_after_external_result(
         repository_id = str(row.get("repository_id") or "")
         repository_routes = route_by_repository.get(repository_id, [])
         mission = mission_by_repository.get(repository_id)
+        preserve_waiting_user = (
+            repository_id == waiting_user_repository_id
+            and row.get("state") == "WAITING_USER"
+        )
         if repository_routes:
             row["route_owner"] = " | ".join(
                 f"{route.get('action_id')} / {route.get('recipient_thread_id')} / {route.get('observer_kind')}"
                 for route in repository_routes
             )
-            if not (
-                repository_id == waiting_user_repository_id
-                and row.get("state") == "WAITING_USER"
-            ):
+            if not preserve_waiting_user:
                 row["state"] = "WAITING_EXTERNAL"
         else:
             row["route_owner"] = "No active external route; exact result applied."
-            if row.get("frontier_status") != "verified":
+            if preserve_waiting_user:
+                continue
+            if row.get("frontier_disposition") == "none":
+                row["state"] = "READY"
+                row["why"] = (
+                    "The current frontier certifies that no active candidate exists."
+                )
+                row["next_move"] = (
+                    "Reconcile exact project context; do not authorize ordinary work from absence."
+                )
+                row["route_owner"] = (
+                    "No active external route; project-context continuation is required."
+                )
+            elif row.get("frontier_status") != "verified":
                 row["state"] = "READY"
                 row["why"] = (
                     "The external route ended without a current certified frontier."

@@ -262,7 +262,13 @@ the cursor from its existing lease order without changing any delivery identity.
 Every action in the current highest-priority `ready_actions` set is claimable,
 not only the first display/default action. This lets an explicit portfolio
 scope omit an unrelated same-priority repository without making that row a
-global barrier. A claim may not skip to a lower priority class.
+global barrier. A claim normally may not skip to a lower priority class. The
+only exception is an exact `reconcile_project_context` action whose current
+frontier event is linked to a same-repository completed
+`reconcile_repository_frontier` result. That action is the mandatory next hop
+of the already-consumed result, not a new discretionary work start, and may
+drain ahead of an unrelated default frontier row. No ordinary lower-priority
+action receives this exception.
 The new-work-start pass budget remains a primary-Coordinator execution rule;
 the scheduler does not claim a durable pass ledger. A completed action is
 skipped and an active route's repository is excluded from conflicting execution

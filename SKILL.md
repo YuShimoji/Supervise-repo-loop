@@ -233,7 +233,11 @@ The Coordinator may claim any action returned in the plan's current
 highest-priority `ready_actions` set, not only the first display/default action.
 Use that bounded choice to honor an explicit repository scope; never skip a
 higher-priority action class or treat an out-of-scope same-priority repository
-as a global barrier.
+as a global barrier. The narrow exception is an exact
+`reconcile_project_context` action bound to the same repository and frontier
+event as a just-applied `reconcile_repository_frontier` result. Drain that
+mandatory continuation even when an unrelated default frontier row sorts
+first; this does not authorize any unrelated lower-priority action.
 
 There is no launch-set completion barrier. An unresponded `USER_DECISION` or
 `USER_ACTION` parks only its exact Mission and is not an execution candidate.
@@ -317,6 +321,11 @@ exact active Supervisor and wait for the typed result; a legacy local
 completion must not suppress that routed action. A visible `next_user_card`
 parks only its Mission: if an unrelated reconciliation or work action is
 claimable, execution is `READY` or `DRAINING`, not globally `WAITING_USER`.
+An applied epoch-one-or-later disposition-`none` frontier result certifies
+absence while its complete authority fingerprint is unchanged. Do not route
+the same frontier reconciliation again; proceed only to exact project-context
+reconciliation or park/`NO_WORK`. Reopen frontier reconciliation after an
+authority high-water change, and never derive ordinary work from absence.
 A `BLOCKED` frontier never authorizes a generic successor; a changed
 recovery signal creates one bounded recovery action. A `COMPLETE` lane frontier
 permits one Supervisor successor request when repository policy allows it.

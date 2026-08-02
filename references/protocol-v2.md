@@ -245,7 +245,9 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
 - The same repository may own that Mission-scoped user card and an independent
   control-plane route. Preserve the row as `WAITING_USER`, project the route in
   `active_routes` and `route_owner`, and keep top-level execution draining or
-  waiting externally. Applying another route result cannot erase either side.
+  waiting externally. The complete card remains authoritative when that route
+  remains, closes, or is replaced by its required continuation. Applying
+  another route result cannot erase either side.
 
 ## Reconciliation result contract
 
@@ -257,6 +259,14 @@ results use `coordinator-action-apply-result`; standalone context results use
 `coordinator-action-apply-project-context-result`. Only the matching primary
 Coordinator applies them, closes that route, recomputes the plan, and drains
 the next claimable action before checkpoint.
+
+An applied disposition-`none` frontier result certifies current absence while
+its complete authority fingerprint is unchanged. It suppresses an immediate
+same-kind frontier retry, permits the exact project-context continuation, and
+never authorizes ordinary work from absence alone. An authority high-water
+change reopens frontier reconciliation. That same-repository continuation may
+drain ahead of an unrelated default frontier action; this is not permission to
+skip priority for unrelated ordinary work.
 
 Repository-frontier reconciliation has no Mission identity. Its external
 result carries all four Mission replacement fields as explicit `null` and may

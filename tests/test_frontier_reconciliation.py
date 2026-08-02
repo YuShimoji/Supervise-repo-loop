@@ -495,6 +495,200 @@ class FrontierReconciliationRegressionTests(unittest.TestCase):
         self.assertEqual(remaining_row["state"], "WAITING_USER")
         self.assertIn("action-user-wait-route", remaining_row["route_owner"])
 
+    def test_FR_RESULT_05_closing_card_repository_route_preserves_user_wait(
+        self,
+    ) -> None:
+        registry, hosts, adapter, coordinator = fixture()
+        scheduler = scheduler_with_waiting_route()
+        lease = scheduler["route_leases"][0]
+        lease["action"]["kind"] = "reconcile_repository_frontier"
+        lease["action"]["payload"]["route"]["mission_id"] = None
+        lease["action"]["payload"]["route"]["attempt_id"] = None
+        lease["mission_id"] = None
+        lease["attempt_id"] = None
+        scheduler["active_claim"] = copy.deepcopy(lease)
+        frontier = loop.default_frontier_state([REPO_A, REPO_B])
+        context = loop.default_project_context_state([REPO_A, REPO_B])
+        event = frontier_event(
+            epoch=1,
+            based_on=0,
+            artifact_id="user-wait-current",
+            actor="supervisor",
+            token="closing-own-control-route",
+        )
+        payload = external_result(event, result_id="closing-own-route-result")
+        for field in (
+            "mission_id",
+            "attempt_id",
+            "mission_before_sha256",
+            "mission_after",
+        ):
+            payload[field] = None
+
+        portfolio = portfolio_v2()
+        portfolio["next_user_action"] = {
+            "repository_id": REPO_A,
+            "kind": "USER_ACTION",
+            "purpose": "Supply exact source bytes.",
+            "why_now": "The exact Mission is parked for user input.",
+            "entrypoint": "This Coordinator task",
+            "requirements": ["Attach one exact source file."],
+            "reply_format": "Attach the file.",
+            "owner": "User",
+            "post_reply_behavior": "Resume only the parked Mission.",
+            "non_escalation_boundary": "Do not infer source content.",
+        }
+        portfolio["repositories"][0]["state"] = "WAITING_USER"
+        portfolio = loop.migrate_portfolio_to_project_context_v4(
+            portfolio,
+            context,
+            frontier,
+            [payload["authority_signal"]],
+        )
+
+        result = loop.apply_external_result_transaction(
+            scheduler,
+            frontier,
+            [],
+            portfolio,
+            "action-frontier",
+            payload,
+            observed_authority_signal=payload["authority_signal"],
+            project_context_state=context,
+            actor_task_id=OWNER,
+        )
+
+        self.assertEqual(result["classification"], "EXTERNAL_RESULT_APPLIED")
+        self.assertEqual(scheduler["route_leases"], [])
+        self.assertEqual(
+            portfolio["next_user_action"]["repository_id"], REPO_A
+        )
+        self.assertEqual(portfolio["repositories"][0]["state"], "WAITING_USER")
+
+        plan = loop.build_coordinator_plan(
+            registry,
+            hosts,
+            adapter,
+            [],
+            coordinator,
+            scheduler,
+            authority_signals=[payload["authority_signal"]],
+            frontier_state=frontier,
+            project_context_state=context,
+        )
+        context_action = next(
+            action
+            for action in plan["ready_actions"]
+            if action["kind"] == "reconcile_project_context"
+            and action["payload"]["repository_id"] == REPO_A
+        )
+        self.assertIn(
+            context_action["action_id"],
+            {
+                action["action_id"]
+                for action in plan["required_handoff_actions"]
+            },
+        )
+
+    def test_FR_RESULT_06_none_result_advances_to_context_without_frontier_retry(
+        self,
+    ) -> None:
+        registry, hosts, adapter, coordinator = fixture()
+        scheduler = scheduler_with_waiting_route()
+        lease = scheduler["route_leases"][0]
+        lease["action"]["kind"] = "reconcile_repository_frontier"
+        lease["action"]["payload"]["route"]["mission_id"] = None
+        lease["action"]["payload"]["route"]["attempt_id"] = None
+        lease["mission_id"] = None
+        lease["attempt_id"] = None
+        scheduler["active_claim"] = copy.deepcopy(lease)
+        frontier = loop.default_frontier_state([REPO_A, REPO_B])
+        context = loop.default_project_context_state([REPO_A, REPO_B])
+        event = frontier_event(
+            epoch=1,
+            based_on=0,
+            artifact_id=None,
+            actor="supervisor",
+            disposition="none",
+            token="certified-absence",
+        )
+        payload = external_result(event, result_id="certified-absence-result")
+        for field in (
+            "mission_id",
+            "attempt_id",
+            "mission_before_sha256",
+            "mission_after",
+        ):
+            payload[field] = None
+        portfolio = portfolio_v2()
+
+        applied = loop.apply_external_result_transaction(
+            scheduler,
+            frontier,
+            [],
+            portfolio,
+            "action-frontier",
+            payload,
+            observed_authority_signal=payload["authority_signal"],
+            project_context_state=context,
+            actor_task_id=OWNER,
+        )
+        self.assertEqual(applied["classification"], "EXTERNAL_RESULT_APPLIED")
+
+        unchanged = loop.build_coordinator_plan(
+            registry,
+            hosts,
+            adapter,
+            [],
+            coordinator,
+            scheduler,
+            authority_signals=[payload["authority_signal"]],
+            frontier_state=frontier,
+            project_context_state=context,
+        )
+        self.assertFalse(
+            any(
+                action["kind"] == "reconcile_repository_frontier"
+                and action["payload"]["repository_id"] == REPO_A
+                for action in unchanged["ready_actions"]
+            )
+        )
+        self.assertTrue(
+            any(
+                action["kind"] == "reconcile_project_context"
+                and action["payload"]["repository_id"] == REPO_A
+                for action in unchanged["ready_actions"]
+            )
+        )
+
+        changed_signal = copy.deepcopy(payload["authority_signal"])
+        changed_signal["root"] = "C:/synthetic/repository-authority-changed"
+        changed_signal["authority_fingerprint"] = loop.canonical_json_hash(
+            {
+                key: value
+                for key, value in changed_signal.items()
+                if key != "authority_fingerprint"
+            }
+        )
+        changed = loop.build_coordinator_plan(
+            registry,
+            hosts,
+            adapter,
+            [],
+            coordinator,
+            scheduler,
+            authority_signals=[changed_signal],
+            frontier_state=frontier,
+            project_context_state=context,
+        )
+        self.assertTrue(
+            any(
+                action["kind"] == "reconcile_repository_frontier"
+                and action["payload"]["repository_id"] == REPO_A
+                for action in changed["ready_actions"]
+            )
+        )
+
     def test_FR_RA_01_human_accepted_normal_360_blocks_old_artifact_repromotion(self) -> None:
         state = loop.default_frontier_state([REPO_A])
         normal = frontier_event(epoch=1, based_on=0, artifact_id="normal-360", actor="human", token="normal-360")

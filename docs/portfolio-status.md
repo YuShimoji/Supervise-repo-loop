@@ -140,7 +140,11 @@ an independent control-plane route. Its row remains `WAITING_USER` so the card
 stays actionable, while `active_routes` and `route_owner` retain the exact
 control action, recipient, observer, token, and cursor. Top-level execution is
 still draining or waiting externally. Refreshing another route result must not
-rewrite that row to `WAITING_EXTERNAL` or drop the card.
+rewrite that row to `WAITING_EXTERNAL` or drop the card. The complete top-level
+card remains authoritative for its Mission row when that repository's own
+control route remains active, closes, or is replaced by its mandatory context
+route; scheduler projection still independently determines `active_routes`,
+`route_owner`, and top-level execution.
 
 ## User input and proposal lineage
 

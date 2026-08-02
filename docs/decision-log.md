@@ -330,3 +330,33 @@
   or drain; other routed rows remain `WAITING_EXTERNAL`.
 - Effect: applying one project's typed result no longer atomically fails because
   another project's user card and control route legitimately coexist.
+
+## D-028 — A complete user card survives its own control-route transition
+
+- Date: 2026-08-02
+- Corrects: preserving `WAITING_USER` only while the same repository still had
+  an active control route. Closing that repository's frontier route caused the
+  refresh to rewrite the row while its complete top-level card remained.
+- Decision: treat the complete `next_user_action` as authoritative for its
+  Mission row whether the independent control route remains, closes, or is
+  replaced by the context continuation. Derive route projection and top-level
+  execution independently from the scheduler.
+- Effect: applying the card repository's Missionless frontier result preserves
+  the exact user card and makes its context follow-up schedulable atomically.
+
+## D-029 — Applied absence advances the protocol instead of repeating it
+
+- Date: 2026-08-02
+- Corrects: immediately recreating `reconcile_repository_frontier` after an
+  exact epoch-one `none` result had certified that current authority contained
+  no active candidate.
+- Decision: bind an applied `none` FrontierRecord to its result receipt and
+  complete authority fingerprint. Suppress the same frontier reconciliation
+  while that fingerprint is unchanged, permit only the mandatory project-
+  context continuation, and reopen reconciliation after an authority change.
+  A context continuation bound to the just-applied same-repository frontier may
+  drain ahead of an unrelated default frontier row; unrelated lower-priority
+  work remains forbidden.
+- Effect: a valid absence result cannot form an unchanged reconciliation loop,
+  and selected work is not preempted by an out-of-scope default row between two
+  halves of the same result protocol.

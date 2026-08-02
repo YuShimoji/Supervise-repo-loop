@@ -354,6 +354,105 @@ class SchedulerRouteLeaseV2Tests(unittest.TestCase):
                 lower["action_id"],
             )
 
+    def test_T153_applied_frontier_context_handoff_bypasses_unrelated_default(
+        self,
+    ) -> None:
+        _, _, _, coordinator = fixture()
+        owner = coordinator["coordinator_task"]["task_id"]
+        frontier_event_id = "frontier-event-scoped-continuation"
+        outside = loop._scheduler_action(
+            "reconcile_repository_frontier",
+            {
+                "repository_id": REPO_A,
+                "route": {
+                    "repository_id": REPO_A,
+                    "supervision_lane": "default",
+                    "recipient_kind": "supervisor",
+                    "recipient_thread_id": "supervisor-a",
+                    "observer_kind": "chatgpt_poll",
+                },
+            },
+            priority=5,
+            stable_order=0,
+            requires_external_result=True,
+        )
+        continuation = loop._scheduler_action(
+            "reconcile_project_context",
+            {
+                "repository_id": REPO_B,
+                "lane_id": "default",
+                "route": {
+                    "repository_id": REPO_B,
+                    "supervision_lane": "default",
+                    "recipient_kind": "supervisor",
+                    "recipient_thread_id": "supervisor-b",
+                    "observer_kind": "chatgpt_poll",
+                },
+                "current_lane_frontiers": [
+                    {
+                        "repository_id": REPO_B,
+                        "lane_id": "default",
+                        "frontier_event_id": frontier_event_id,
+                    }
+                ],
+            },
+            priority=6,
+            stable_order=1,
+            requires_external_result=True,
+        )
+        scheduler = loop.default_scheduler_state()
+        scheduler["completed_actions"].append(
+            {
+                "action_id": "applied-frontier-action",
+                "kind": "reconcile_repository_frontier",
+                "repository_id": REPO_B,
+                "outcome": "result_applied",
+                "external_lifecycle_state": "result_applied",
+                "evidence": {"frontier_event_id": frontier_event_id},
+            }
+        )
+        plan = {
+            "primary_writer_task_id": owner,
+            "scheduler_revision": scheduler["revision"],
+            "capacity_remaining": 1,
+            "state_fingerprint": "scoped-context-continuation",
+            "next_action": outside,
+            "ready_actions": [outside, continuation],
+        }
+
+        claimed = loop.claim_coordinator_action(
+            scheduler,
+            plan,
+            continuation["action_id"],
+            owner_task_id=owner,
+        )
+        self.assertEqual(
+            claimed["action"]["kind"], "reconcile_project_context"
+        )
+        self.assertEqual(
+            claimed["action"]["action_id"], continuation["action_id"]
+        )
+
+        unrelated = copy.deepcopy(continuation)
+        unrelated["kind"] = "advance_mission"
+        unrelated["action_id"] = "unrelated-lower-priority"
+        unrelated_scheduler = loop.default_scheduler_state()
+        unrelated_plan = {
+            **plan,
+            "scheduler_revision": unrelated_scheduler["revision"],
+            "next_action": outside,
+            "ready_actions": [outside, unrelated],
+        }
+        with self.assertRaisesRegex(
+            loop.ProtocolError, "current highest-priority ready set"
+        ):
+            loop.claim_coordinator_action(
+                unrelated_scheduler,
+                unrelated_plan,
+                unrelated["action_id"],
+                owner_task_id=owner,
+            )
+
     def test_T75_waiting_A_keeps_B_ready_and_claimable(self) -> None:
         registry, hosts, adapter, coordinator = fixture()
         missions = [

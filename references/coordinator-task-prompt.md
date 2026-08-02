@@ -308,7 +308,10 @@ Portfolio scheduling pass
   READY with free capacity is neither a checkpoint nor a blocker.
 - Any action in the current highest-priority `ready_actions` set is claimable;
   `next_action` is the deterministic default, not a requirement to include an
-  out-of-scope same-priority repository. Never skip a higher-priority class.
+  out-of-scope same-priority repository. Never skip a higher-priority class
+  except for the exact same-repository `reconcile_project_context` continuation
+  linked to a just-applied frontier result; that is one mandatory protocol
+  chain, not discretionary lower-priority work.
 - A changed BLOCKED recovery observation creates one bounded action. An
   unchanged blocker never retries. A complete lane creates at most one
   successor request for the exact completed frontier and authority revision.
@@ -356,6 +359,11 @@ Waiting and turn budget
   `coordinator-action-apply-project-context-result`. Immediately recompute the
   plan after either result reducer; an unchanged reconciliation ledger remains
   claimable work rather than a checkpoint.
+- An applied disposition-`none` frontier result suppresses the same-kind retry
+  while its complete authority fingerprint is unchanged. Continue to exact
+  project-context reconciliation or park/`NO_WORK`; never infer ordinary work
+  from absence. Reissue frontier reconciliation only after authority high-water
+  changes or a later explicit superseding event.
 - Do not repeatedly wait on one exact task while unrelated capacity or READY
   work exists. Do not treat commentary, an active flag, or an unchanged
   snapshot as a result event.
@@ -427,6 +435,10 @@ Durable portfolio index
   entrypoint, all requirements, reply format, owner, post-reply behavior, and
   non-escalation boundary. A `WAITING_USER` row without that card forbids the
   status checkpoint; do not make the user search another task or state file.
+  Keep that Mission row `WAITING_USER` when its independent control route
+  remains, closes, or becomes the required context continuation. Project the
+  scheduler route set and top-level execution independently; never drop or
+  replace the complete card during that transition.
 - Distinguish MISSION_COMPLETE_NEXT_UNSELECTED, PARKED_BY_POLICY, and
   PROJECT_COMPLETE. Never describe a project as complete merely because its
   current Mission ended.

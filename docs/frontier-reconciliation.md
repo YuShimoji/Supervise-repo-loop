@@ -65,6 +65,16 @@ work. Recording a read-only observation as a completed local action leaves the
 ledger unresolved and must not make the portfolio globally idle or
 `WAITING_USER` while another route remains claimable.
 
+An applied typed result with `frontier_epoch >= 1`, disposition `none`, and a
+null artifact is a semantic certificate that the current authority has no
+active candidate. While the complete authority fingerprint is unchanged, the
+planner must not issue another `reconcile_repository_frontier` action for that
+repository/lane. It may issue the exact project-context continuation, or park
+with no ordinary work. A later authority high-water change invalidates the
+absence certificate and makes frontier reconciliation claimable again. A
+legacy/direct tombstone without an applied-result receipt continues to block
+ordinary work but does not suppress reconciliation.
+
 ## Authority high-water signal
 
 `collect_authority_signals` records every registered repository even when no

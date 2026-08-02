@@ -107,15 +107,17 @@ full regression, and source/installed static parity. Live registered projects
 remain reconciliation-only until the exact primary Coordinator applies current
 context events; this repair task does not infer or initialize them.
 
-For the root-loop correction, live acceptance additionally requires the exact
-primary Coordinator to claim and send the corrected Supervisor routes, then
-apply at least one typed reconciliation result so the corresponding ledger
-advances. A read-only plan showing claimable routes proves repair readiness but
-is not itself proof that the loop is in flight.
+The root-loop correction's live gate is satisfied: the exact primary
+Coordinator claimed and sent the scoped frontier routes, applied all three
+typed results, advanced the frontier ledger, and durably routed all three
+mandatory project-context continuations. Their context results remain ordinary
+external waits owned by the event-driven drain; they are not a source-repair
+acceptance blocker. The larger multi-project operational canaries above remain
+separate gates for the whole redesign.
 
 ## Acceptance state
 
-- 2026-08-02 root-loop correction installed: frontier and project-context
+- 2026-08-02 root-loop correction live-verified: frontier and project-context
   reconciliation are exact Supervisor external routes, standalone context
   results have a replay-safe primary-only reducer, and legacy local abstention
   completions cannot suppress the routed identities. The revision-194 live
@@ -126,10 +128,16 @@ is not itself proof that the loop is in flight.
   the same highest-priority ready set. Applying the first valid typed
   ClipPipeGen result exposed and corrected a third blocker: repository-frontier
   reconciliation is Missionless, while ordinary result routes retain exact
-  Mission CAS. All 186 source and installed tests passed, and the 60-file
-  static allowlist passed SHA-256 readback without synchronizing live `state/`.
-  Three scoped routes are durably in flight; retry of the same ClipPipeGen
-  result and the resulting ledger advance remain the live gate.
+  Mission CAS. Later live results exposed and corrected card loss during a
+  control-route transition, priority preemption of the mandatory same-project
+  continuation, and unchanged reissue after a valid disposition-`none` result.
+  Commit `f0cfdc6` passed all 190 source and installed tests plus 60-file
+  SHA-256 readback without synchronizing live `state/`. The exact primary then
+  applied all three scoped frontier results (`scheduler revision 209`, frontier
+  revision 6), preserved Densou card `a865096f37d8045c8cb1`, and sent all three
+  exact project-context continuations. At scheduler revision 221 the canonical
+  portfolio is `DRAINING` with three real waiting routes and an active event-
+  driven watchdog; Residual Atlas was not claimed.
 - 2026-08-02 WAITING_USER renderer correction: project-context migration now
   preserves user/external waits, parks, blockers, and terminal states while
   gating only ordinary `RUNNING`/`READY` work. The revision-194-shaped

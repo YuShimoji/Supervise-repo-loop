@@ -259,6 +259,10 @@ protocol hop is one handoff chain, not a second work start; it drains to the
 next exact external wait or terminal before checkpoint. Equal-priority admission uses the scheduler's durable
 `round_robin_cursor_repository_id`; an early v2 state without that field derives
 the cursor from its existing lease order without changing any delivery identity.
+Every action in the current highest-priority `ready_actions` set is claimable,
+not only the first display/default action. This lets an explicit portfolio
+scope omit an unrelated same-priority repository without making that row a
+global barrier. A claim may not skip to a lower priority class.
 The new-work-start pass budget remains a primary-Coordinator execution rule;
 the scheduler does not claim a durable pass ledger. A completed action is
 skipped and an active route's repository is excluded from conflicting execution

@@ -320,6 +320,40 @@ class SchedulerRouteLeaseV2Tests(unittest.TestCase):
         self.assertEqual(plan["active_routes"], [])
         self.assertEqual(plan["wait_targets"], [])
 
+        selected = plan["ready_actions"][1]
+        claimed = loop.claim_coordinator_action(
+            loop.default_scheduler_state(),
+            plan,
+            selected["action_id"],
+        )
+        self.assertEqual(action_repository_id(claimed["action"]), REPO_B)
+
+    def test_T152_claim_cannot_skip_the_current_priority_class(self) -> None:
+        registry, hosts, adapter, coordinator = fixture()
+        missions = [
+            mission(REPO_A, "WORK_ORDER_RECEIVED", mission_id="priority-a"),
+            mission(REPO_B, "WORK_ORDER_RECEIVED", mission_id="priority-b"),
+        ]
+        plan = loop.build_coordinator_plan(
+            registry,
+            hosts,
+            adapter,
+            missions,
+            coordinator,
+            loop.default_scheduler_state(),
+        )
+        lower = plan["ready_actions"][1]
+        lower["priority"] = int(plan["next_action"]["priority"]) + 1
+
+        with self.assertRaisesRegex(
+            loop.ProtocolError, "current highest-priority ready set"
+        ):
+            loop.claim_coordinator_action(
+                loop.default_scheduler_state(),
+                plan,
+                lower["action_id"],
+            )
+
     def test_T75_waiting_A_keeps_B_ready_and_claimable(self) -> None:
         registry, hosts, adapter, coordinator = fixture()
         missions = [

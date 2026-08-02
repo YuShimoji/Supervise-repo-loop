@@ -306,6 +306,9 @@ Portfolio scheduling pass
   high-volume project cannot starve another ready project.
 - While capacity remains, claim safe READY actions from other repositories.
   READY with free capacity is neither a checkpoint nor a blocker.
+- Any action in the current highest-priority `ready_actions` set is claimable;
+  `next_action` is the deterministic default, not a requirement to include an
+  out-of-scope same-priority repository. Never skip a higher-priority class.
 - A changed BLOCKED recovery observation creates one bounded action. An
   unchanged blocker never retries. A complete lane creates at most one
   successor request for the exact completed frontier and authority revision.

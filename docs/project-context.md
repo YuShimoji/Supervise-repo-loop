@@ -121,9 +121,13 @@ is not itself proof that the loop is in flight.
   completions cannot suppress the routed identities. The revision-194 live
   state was read only through the corrected source and exposed four claimable
   routes with execution `READY` while preserving the FastFictionFactory user
-  card. All 183 source and installed tests passed, and the 60-file static
-  allowlist passed SHA-256 readback without synchronizing live `state/`. Exact
-  primary claim/send and a resulting ledger advance remain the live gate.
+  card. Live restart then exposed and corrected a second blocker: the claim
+  guard accepted only the first default row instead of another exact action in
+  the same highest-priority ready set. All 184 source and installed tests
+  passed, and the 60-file static allowlist passed SHA-256 readback without
+  synchronizing live `state/`. The FastFictionFactory route is durably in
+  flight; scoped NLMYTGen/ClipPipeGen resume and a resulting ledger advance
+  remain the live gate.
 - 2026-08-02 WAITING_USER renderer correction: project-context migration now
   preserves user/external waits, parks, blockers, and terminal states while
   gating only ordinary `RUNNING`/`READY` work. The revision-194-shaped

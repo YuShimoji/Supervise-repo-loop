@@ -229,6 +229,12 @@ repository route leases are separate identities. Never request that the user
 re-enter a repository name. `coordinator-status`, generic resolution, recovery,
 and the portfolio index must not compute independent answers.
 
+The Coordinator may claim any action returned in the plan's current
+highest-priority `ready_actions` set, not only the first display/default action.
+Use that bounded choice to honor an explicit repository scope; never skip a
+higher-priority action class or treat an out-of-scope same-priority repository
+as a global barrier.
+
 There is no launch-set completion barrier. An unresponded `USER_DECISION` or
 `USER_ACTION` parks only its exact Mission and is not an execution candidate.
 Continue selecting safe work from other Missions and repositories. Recompute

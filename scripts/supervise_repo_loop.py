@@ -8586,9 +8586,21 @@ def claim_coordinator_action(
             "action_id": action_id,
             "deduplicated": True,
         }
-    action = plan.get("next_action")
-    if not isinstance(action, dict) or action.get("action_id") != action_id:
+    next_action = plan.get("next_action")
+    action = next(
+        (
+            item
+            for item in plan.get("ready_actions", [])
+            if isinstance(item, dict) and item.get("action_id") == action_id
+        ),
+        None,
+    )
+    if not isinstance(next_action, dict) or not isinstance(action, dict):
         raise ProtocolError("scheduler action is stale, capacity-limited, or not next")
+    if action.get("priority") != next_action.get("priority"):
+        raise ProtocolError(
+            "scheduler action is not in the current highest-priority ready set"
+        )
     if int(plan.get("scheduler_revision", -1)) != int(
         scheduler_state.get("revision", 0)
     ):

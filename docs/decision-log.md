@@ -292,3 +292,15 @@
   routes. The Coordinator can fill independent capacity, consume exact
   Supervisor results, advance the ledgers, and proceed to ordinary work without
   waiting for an unrelated user response.
+
+## D-025 — The highest-priority ready set is claimable, not only its first row
+
+- Date: 2026-08-02
+- Corrects: exposing several same-priority `ready_actions` while the mutation
+  guard accepted only `next_action`. An out-of-scope repository could therefore
+  block scoped routes even though capacity and exact action identities existed.
+- Decision: permit claim of any action in the current highest-priority ready
+  set while retaining revision, capacity, route-conflict, and single-writer
+  checks. Lower-priority work cannot bypass the deterministic priority class.
+- Effect: an explicit portfolio scope can omit an unrelated repository without
+  stopping the selected projects or weakening mandatory-result priority.

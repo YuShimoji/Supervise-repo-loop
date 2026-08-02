@@ -123,11 +123,13 @@ is not itself proof that the loop is in flight.
   routes with execution `READY` while preserving the FastFictionFactory user
   card. Live restart then exposed and corrected a second blocker: the claim
   guard accepted only the first default row instead of another exact action in
-  the same highest-priority ready set. All 184 source and installed tests
-  passed, and the 60-file static allowlist passed SHA-256 readback without
-  synchronizing live `state/`. The FastFictionFactory route is durably in
-  flight; scoped NLMYTGen/ClipPipeGen resume and a resulting ledger advance
-  remain the live gate.
+  the same highest-priority ready set. Applying the first valid typed
+  ClipPipeGen result exposed and corrected a third blocker: repository-frontier
+  reconciliation is Missionless, while ordinary result routes retain exact
+  Mission CAS. All 186 source and installed tests passed, and the 60-file
+  static allowlist passed SHA-256 readback without synchronizing live `state/`.
+  Three scoped routes are durably in flight; retry of the same ClipPipeGen
+  result and the resulting ledger advance remain the live gate.
 - 2026-08-02 WAITING_USER renderer correction: project-context migration now
   preserves user/external waits, parks, blockers, and terminal states while
   gating only ordinary `RUNNING`/`READY` work. The revision-194-shaped

@@ -254,6 +254,11 @@ results use `coordinator-action-apply-result`; standalone context results use
 Coordinator applies them, closes that route, recomputes the plan, and drains
 the next claimable action before checkpoint.
 
+Repository-frontier reconciliation has no Mission identity. Its external
+result carries all four Mission replacement fields as explicit `null` and may
+advance only the frontier. Every Mission-bound route continues to require exact
+Mission/attempt identity, before-hash CAS, and an append-only replacement.
+
 ## State separation
 
 Keep these states independent:

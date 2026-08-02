@@ -309,6 +309,86 @@ class FrontierReconciliationRegressionTests(unittest.TestCase):
         self.assertEqual(portfolio["repositories"][0]["frontier_certificate"]["artifact_id"], "fff-d0")
         self.assertEqual(scheduler["completed_actions"][0]["external_lifecycle_state"], "result_applied")
 
+    def test_FR_RESULT_02_missionless_reconciliation_applies_frontier_only(self) -> None:
+        scheduler = scheduler_with_waiting_route()
+        lease = scheduler["route_leases"][0]
+        lease["action"]["kind"] = "reconcile_repository_frontier"
+        lease["action"]["payload"]["route"]["mission_id"] = None
+        lease["action"]["payload"]["route"]["attempt_id"] = None
+        lease["mission_id"] = None
+        lease["attempt_id"] = None
+        scheduler["active_claim"] = copy.deepcopy(lease)
+        frontier = loop.default_frontier_state([REPO_A])
+        missions = [mission_record()]
+        missions_before = copy.deepcopy(missions)
+        portfolio = portfolio_v2()
+        event = frontier_event(
+            epoch=1,
+            based_on=0,
+            artifact_id="reconciled-artifact",
+            actor="supervisor",
+            token="missionless-reconciliation",
+        )
+        payload = external_result(event, result_id="missionless-result")
+        for field in (
+            "mission_id",
+            "attempt_id",
+            "mission_before_sha256",
+            "mission_after",
+        ):
+            payload[field] = None
+
+        result = loop.apply_external_result_transaction(
+            scheduler,
+            frontier,
+            missions,
+            portfolio,
+            "action-frontier",
+            payload,
+            observed_authority_signal=payload["authority_signal"],
+            actor_task_id=OWNER,
+        )
+
+        self.assertEqual(result["classification"], "EXTERNAL_RESULT_APPLIED")
+        self.assertGreaterEqual(frontier["revision"], 1)
+        self.assertEqual(
+            current_frontier(frontier)["artifact_id"], "reconciled-artifact"
+        )
+        self.assertEqual(missions, missions_before)
+        self.assertEqual(scheduler["route_leases"], [])
+
+    def test_FR_RESULT_03_mission_bound_route_still_requires_exact_mission(self) -> None:
+        scheduler = scheduler_with_waiting_route()
+        frontier = loop.default_frontier_state([REPO_A])
+        event = frontier_event(
+            epoch=1,
+            based_on=0,
+            artifact_id="invalid-missionless-artifact",
+            actor="supervisor",
+            token="mission-required",
+        )
+        payload = external_result(event, result_id="mission-required-result")
+        for field in (
+            "mission_id",
+            "attempt_id",
+            "mission_before_sha256",
+            "mission_after",
+        ):
+            payload[field] = None
+
+        result = loop.apply_external_result_transaction(
+            scheduler,
+            frontier,
+            [mission_record()],
+            portfolio_v2(),
+            "action-frontier",
+            payload,
+            observed_authority_signal=payload["authority_signal"],
+            actor_task_id=OWNER,
+        )
+        self.assertEqual(result["classification"], "EXTERNAL_RESULT_FAILED")
+        self.assertIn("mission_id identity mismatch", result["reason"])
+
     def test_FR_RA_01_human_accepted_normal_360_blocks_old_artifact_repromotion(self) -> None:
         state = loop.default_frontier_state([REPO_A])
         normal = frontier_event(epoch=1, based_on=0, artifact_id="normal-360", actor="human", token="normal-360")

@@ -96,6 +96,13 @@ revision. The application
 transaction validates all identities, applies the frontier CAS, replaces the
 exact Mission, completes the scheduler route, and regenerates portfolio v4.
 Only then is the action `result_applied`.
+
+`reconcile_repository_frontier` is intentionally Missionless. Its exact result
+must set `mission_id`, `attempt_id`, `mission_before_sha256`, and
+`mission_after` to `null`; the reducer advances only the frontier and leaves
+every Mission byte-for-byte unchanged. Ordinary and Mission-bound routes still
+require the complete Mission identity, before-hash CAS, and append-only
+replacement.
 Failed and stale results close their route as a terminal non-applied action,
 remain in the failure/quarantine ledger, and regenerate the portfolio without
 leaving a false active wait.

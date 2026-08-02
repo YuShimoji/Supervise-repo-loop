@@ -304,3 +304,16 @@
   checks. Lower-priority work cannot bypass the deterministic priority class.
 - Effect: an explicit portfolio scope can omit an unrelated repository without
   stopping the selected projects or weakening mandatory-result priority.
+
+## D-026 — Frontier reconciliation is explicitly Missionless
+
+- Date: 2026-08-02
+- Corrects: the exact frontier reconciliation prompt and route emitted null
+  Mission fields, while the shared result reducer accepted null only for
+  direction and project-question control routes.
+- Decision: allow `reconcile_repository_frontier` only when all four Mission
+  replacement fields are explicitly null, advance the frontier transaction,
+  and leave every Mission unchanged. Retain exact Mission CAS for every
+  Mission-bound action.
+- Effect: a valid typed reconciliation result can advance the ledger and close
+  its route without inventing a Mission or weakening ordinary result safety.

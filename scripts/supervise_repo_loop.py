@@ -9773,9 +9773,16 @@ def _validated_mission_replacement(
         if lease.get("action", {}).get("kind") in {
             "route_direction_update",
             "route_project_question",
-        } and result.get("mission_before_sha256") is None and result.get(
-            "mission_after"
-        ) is None:
+            "reconcile_repository_frontier",
+        } and all(
+            result.get(field) is None
+            for field in (
+                "mission_id",
+                "attempt_id",
+                "mission_before_sha256",
+                "mission_after",
+            )
+        ):
             return None, None
         raise ProtocolError("external result requires one exact Mission")
     matches = [

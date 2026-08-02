@@ -242,6 +242,10 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
 - The inverse is not valid: a present user card does not make the whole
   portfolio `WAITING_USER`. Unrelated claimable reconciliation or ordinary
   work keeps global execution `READY` or `DRAINING` and must continue.
+- The same repository may own that Mission-scoped user card and an independent
+  control-plane route. Preserve the row as `WAITING_USER`, project the route in
+  `active_routes` and `route_owner`, and keep top-level execution draining or
+  waiting externally. Applying another route result cannot erase either side.
 
 ## Reconciliation result contract
 

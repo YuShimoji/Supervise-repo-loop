@@ -135,6 +135,13 @@ same complete top-level `next_user_action`. This keeps the renderer aligned
 with the deterministic plan while the project-wide roadmap remains explicitly
 uncertified.
 
+A repository may simultaneously own a Mission-scoped `WAITING_USER` card and
+an independent control-plane route. Its row remains `WAITING_USER` so the card
+stays actionable, while `active_routes` and `route_owner` retain the exact
+control action, recipient, observer, token, and cursor. Top-level execution is
+still draining or waiting externally. Refreshing another route result must not
+rewrite that row to `WAITING_EXTERNAL` or drop the card.
+
 ## User input and proposal lineage
 
 Top-level `next_user_action` is either `null` or the one complete card the user

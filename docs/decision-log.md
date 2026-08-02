@@ -317,3 +317,16 @@
   Mission-bound action.
 - Effect: a valid typed reconciliation result can advance the ledger and close
   its route without inventing a Mission or weakening ordinary result safety.
+
+## D-027 — A Mission user wait can coexist with a control route
+
+- Date: 2026-08-02
+- Corrects: result refresh unconditionally changing every repository with an
+  active external route to `WAITING_EXTERNAL`, which invalidated a complete
+  `next_user_action` for another Mission in the same repository.
+- Decision: preserve `WAITING_USER` for the repository identified by the
+  complete top-level card while retaining its independent route in
+  `active_routes` and `route_owner`. Top-level execution remains external wait
+  or drain; other routed rows remain `WAITING_EXTERNAL`.
+- Effect: applying one project's typed result no longer atomically fails because
+  another project's user card and control route legitimately coexist.

@@ -389,6 +389,112 @@ class FrontierReconciliationRegressionTests(unittest.TestCase):
         self.assertEqual(result["classification"], "EXTERNAL_RESULT_FAILED")
         self.assertIn("mission_id identity mismatch", result["reason"])
 
+    def test_FR_RESULT_04_control_route_coexists_with_user_card_during_apply(self) -> None:
+        scheduler = scheduler_with_waiting_route()
+        clip_lease = scheduler["route_leases"][0]
+        clip_lease["action"]["kind"] = "reconcile_repository_frontier"
+        clip_lease["action"]["payload"]["route"]["mission_id"] = None
+        clip_lease["action"]["payload"]["route"]["attempt_id"] = None
+        clip_lease["mission_id"] = None
+        clip_lease["attempt_id"] = None
+        user_route = copy.deepcopy(clip_lease)
+        user_route["action_id"] = "action-user-wait-route"
+        user_route["action"]["action_id"] = user_route["action_id"]
+        user_route["repository_id"] = REPO_B
+        user_route["action"]["payload"]["route"]["repository_id"] = REPO_B
+        user_route["recipient_thread_id"] = "supervisor-thread-b"
+        user_route["action"]["payload"]["route"]["recipient_thread_id"] = (
+            user_route["recipient_thread_id"]
+        )
+        user_route["delivery_token"] = "e" * 64
+        user_route["packet_sha256"] = "f" * 64
+        user_route["after_cursor"] = "cursor-user-route"
+        scheduler["route_leases"].append(user_route)
+        scheduler["active_claim"] = copy.deepcopy(clip_lease)
+
+        frontier = loop.default_frontier_state([REPO_A, REPO_B])
+        context = loop.default_project_context_state([REPO_A, REPO_B])
+        event = frontier_event(
+            epoch=1,
+            based_on=0,
+            artifact_id="clip-current",
+            actor="supervisor",
+            token="coexisting-user-card",
+        )
+        payload = external_result(event, result_id="coexisting-user-card-result")
+        for field in (
+            "mission_id",
+            "attempt_id",
+            "mission_before_sha256",
+            "mission_after",
+        ):
+            payload[field] = None
+
+        portfolio = portfolio_v2()
+        user_row = copy.deepcopy(portfolio["repositories"][0])
+        user_row["repository_id"] = REPO_B
+        user_row["project_name"] = "User-wait project"
+        user_row["state"] = "WAITING_USER"
+        user_row["route_owner"] = (
+            "action-user-wait-route / supervisor-thread-b / chatgpt_poll"
+        )
+        portfolio["repositories"].append(user_row)
+        portfolio["scheduler_revision"] = scheduler["revision"]
+        portfolio["active_routes"] = [
+            loop._scheduler_route_portfolio_projection(route)
+            for route in scheduler["route_leases"]
+        ]
+        portfolio["active_route_count"] = 2
+        portfolio["execution_state"] = "WAITING_EXTERNAL"
+        portfolio["next_user_action"] = {
+            "repository_id": REPO_B,
+            "kind": "USER_ACTION",
+            "purpose": "Supply exact source bytes.",
+            "why_now": "The exact Mission is parked for user input.",
+            "entrypoint": "This Coordinator task",
+            "requirements": ["Attach one exact source file."],
+            "reply_format": "Attach the file.",
+            "owner": "User",
+            "post_reply_behavior": "Resume only the parked Mission.",
+            "non_escalation_boundary": "Do not infer source content.",
+        }
+        portfolio = loop.migrate_portfolio_to_project_context_v4(
+            portfolio,
+            context,
+            frontier,
+            [payload["authority_signal"]],
+        )
+
+        result = loop.apply_external_result_transaction(
+            scheduler,
+            frontier,
+            [],
+            portfolio,
+            "action-frontier",
+            payload,
+            observed_authority_signal=payload["authority_signal"],
+            project_context_state=context,
+            actor_task_id=OWNER,
+        )
+
+        self.assertEqual(result["classification"], "EXTERNAL_RESULT_APPLIED")
+        self.assertEqual(portfolio["execution_state"], "WAITING_EXTERNAL")
+        self.assertEqual(portfolio["active_route_count"], 1)
+        self.assertEqual(
+            portfolio["active_routes"][0]["action_id"],
+            "action-user-wait-route",
+        )
+        self.assertEqual(
+            portfolio["next_user_action"]["repository_id"], REPO_B
+        )
+        remaining_row = next(
+            row
+            for row in portfolio["repositories"]
+            if row["repository_id"] == REPO_B
+        )
+        self.assertEqual(remaining_row["state"], "WAITING_USER")
+        self.assertIn("action-user-wait-route", remaining_row["route_owner"])
+
     def test_FR_RA_01_human_accepted_normal_360_blocks_old_artifact_repromotion(self) -> None:
         state = loop.default_frontier_state([REPO_A])
         normal = frontier_event(epoch=1, based_on=0, artifact_id="normal-360", actor="human", token="normal-360")

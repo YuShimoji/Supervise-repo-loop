@@ -9946,6 +9946,12 @@ def _refresh_portfolio_after_external_result(
         route_by_repository.setdefault(str(route.get("repository_id") or ""), []).append(
             route
         )
+    next_user_action = refreshed.get("next_user_action")
+    waiting_user_repository_id = (
+        str(next_user_action.get("repository_id") or "")
+        if isinstance(next_user_action, dict)
+        else ""
+    )
     mission_by_repository = {
         str(item.get("repository_id") or ""): item
         for item in missions
@@ -9960,7 +9966,11 @@ def _refresh_portfolio_after_external_result(
                 f"{route.get('action_id')} / {route.get('recipient_thread_id')} / {route.get('observer_kind')}"
                 for route in repository_routes
             )
-            row["state"] = "WAITING_EXTERNAL"
+            if not (
+                repository_id == waiting_user_repository_id
+                and row.get("state") == "WAITING_USER"
+            ):
+                row["state"] = "WAITING_EXTERNAL"
         else:
             row["route_owner"] = "No active external route; exact result applied."
             if row.get("frontier_status") != "verified":

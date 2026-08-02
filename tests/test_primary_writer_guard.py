@@ -601,6 +601,43 @@ class PrimaryCoordinatorWriterGuardTests(unittest.TestCase):
             self.assertIn("READ_ONLY_NON_COORDINATOR_TASK", stderr.getvalue())
             self.assertFalse(context_path.exists())
 
+    def test_T151_secondary_cannot_apply_project_context_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths, _, _ = self._files(root)
+            context_path = root / "project-context-write.json"
+            portfolio_path = root / "portfolio-write.json"
+            with mock.patch.dict(
+                os.environ, {"CODEX_THREAD_ID": SECONDARY}
+            ):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(
+                        loop.main(
+                            [
+                                "coordinator-action-apply-project-context-result",
+                                "--action-id",
+                                "context-action",
+                                "--result",
+                                str(root / "missing-result.json"),
+                                "--coordinator-state",
+                                str(paths["coordinator"]),
+                                "--scheduler-state",
+                                str(paths["scheduler"]),
+                                "--project-context-state",
+                                str(context_path),
+                                "--portfolio",
+                                str(portfolio_path),
+                                "--journal-dir",
+                                str(root / "journal"),
+                            ]
+                        ),
+                        2,
+                    )
+            self.assertIn("READ_ONLY_NON_COORDINATOR_TASK", stderr.getvalue())
+            self.assertFalse(context_path.exists())
+            self.assertFalse(portfolio_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supervise-repo-loop/project-context-result.v1",
+  "title": "Exact Supervisor project-context reconciliation result v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "result_id",
+    "action_id",
+    "repository_id",
+    "lane_id",
+    "source_actor",
+    "source_thread_id",
+    "source_turn_id",
+    "source_message_id",
+    "based_on_project_context_revision",
+    "project_context_event"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "result_id": {"type": "string", "minLength": 1},
+    "action_id": {"type": "string", "minLength": 1},
+    "repository_id": {"type": "string", "minLength": 1},
+    "lane_id": {"type": "string", "minLength": 1},
+    "source_actor": {"const": "supervisor"},
+    "source_thread_id": {"type": "string", "minLength": 1},
+    "source_turn_id": {"type": "string", "minLength": 1},
+    "source_message_id": {"type": "string", "minLength": 1},
+    "based_on_project_context_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "project_context_event": {
+      "$ref": "project-context-record.v1.schema.json"
+    }
+  },
+  "additionalProperties": false
+}

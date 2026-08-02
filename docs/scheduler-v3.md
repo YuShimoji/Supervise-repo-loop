@@ -179,6 +179,7 @@ coordinator-action-prepare --action-id ... --recipient-thread-id ... --packet-sh
 coordinator-action-sent --action-id ... --recipient-thread-id ...
 coordinator-action-delivery-ack --action-id ... --delivery-ack-id ...
 coordinator-action-apply-result --action-id ... --result ...
+coordinator-action-apply-project-context-result --action-id ... --result ...
 ```
 
 `coordinator-action-complete` remains the local/presentation completion path.
@@ -203,7 +204,11 @@ legacy inferred routes, but all new sends use a claim receipt.
 
 Completed semantic action IDs are retained durably. This prevents an old
 review card, unchanged blocker, or consumed successor intent from reappearing
-after long uptime.
+after long uptime. Reconciliation is different from a local audit: if the
+frontier or project-context revision is still unresolved, an abstention such
+as `AUTHORITY_CONFLICT` or `READ_ONLY_RECONCILIATION_OBSERVED` is not semantic
+completion. The plan emits an exact Supervisor external route whose identity
+cannot be suppressed by a legacy locally completed predecessor.
 
 Every external message carries the prepared delivery envelope containing
 `action_id`, `delivery_token`, and the payload SHA-256. Preparation is persisted
@@ -258,7 +263,11 @@ The new-work-start pass budget remains a primary-Coordinator execution rule;
 the scheduler does not claim a durable pass ledger. A completed action is
 skipped and an active route's repository is excluded from conflicting execution
 sends. An unresponded user card parks only its Mission and cannot suppress
-unrelated ready actions.
+unrelated ready actions. Therefore the presence of `next_user_card` does not
+determine global execution state. If any unrelated reconciliation or ordinary
+action is claimable, execution remains `READY`; after its durable send it is
+`DRAINING`. `WAITING_USER` is valid only when no such action or required
+handoff remains.
 
 The plan must expose an active route and a different repository's ready action
 at the same time. Counting the active action again as ready, or hiding a ready

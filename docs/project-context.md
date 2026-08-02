@@ -73,6 +73,16 @@ position cannot silently diverge. The runtime contains no product-name branch;
 four existing migration shapes and new web/game/media registrations use the
 same contract.
 
+The current root-loop correction addresses the live revision-194 stop. The
+earlier Coordinator recorded frontier reconciliation audits and abstentions as
+locally completed actions even though the frontier ledger stayed at revision
+zero. Those stable action IDs then suppressed every retry, leaving no active
+route; the unrelated FastFictionFactory user card made the whole portfolio
+look `WAITING_USER`. Frontier and project-context reconciliation are now exact
+Supervisor external routes with typed results. A legacy local completion no
+longer shares their identity, and a present user card cannot hide claimable
+work in another project.
+
 ## Final deliverable image
 
 The Coordinator always shows one actionable user card, continues safe READY
@@ -97,8 +107,23 @@ full regression, and source/installed static parity. Live registered projects
 remain reconciliation-only until the exact primary Coordinator applies current
 context events; this repair task does not infer or initialize them.
 
+For the root-loop correction, live acceptance additionally requires the exact
+primary Coordinator to claim and send the corrected Supervisor routes, then
+apply at least one typed reconciliation result so the corresponding ledger
+advances. A read-only plan showing claimable routes proves repair readiness but
+is not itself proof that the loop is in flight.
+
 ## Acceptance state
 
+- 2026-08-02 root-loop correction installed: frontier and project-context
+  reconciliation are exact Supervisor external routes, standalone context
+  results have a replay-safe primary-only reducer, and legacy local abstention
+  completions cannot suppress the routed identities. The revision-194 live
+  state was read only through the corrected source and exposed four claimable
+  routes with execution `READY` while preserving the FastFictionFactory user
+  card. All 183 source and installed tests passed, and the 60-file static
+  allowlist passed SHA-256 readback without synchronizing live `state/`. Exact
+  primary claim/send and a resulting ledger advance remain the live gate.
 - 2026-08-02 WAITING_USER renderer correction: project-context migration now
   preserves user/external waits, parks, blockers, and terminal states while
   gating only ordinary `RUNNING`/`READY` work. The revision-194-shaped

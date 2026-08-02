@@ -10,7 +10,12 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 import supervise_repo_loop as loop  # noqa: E402
-from test_coordinator_only_ux import HOST_ID, fixture  # noqa: E402
+from test_coordinator_only_ux import (  # noqa: E402
+    HOST_ID,
+    fixture,
+    mission as coordinator_mission,
+    review_card,
+)
 from test_frontier_reconciliation import (  # noqa: E402
     LANE,
     OWNER,
@@ -240,6 +245,92 @@ def seven_repository_topology() -> tuple[dict, dict, dict, dict]:
 
 
 class ProjectContextFrontierTests(unittest.TestCase):
+    def test_PC_LOOP_01_legacy_abstention_cannot_suppress_supervisor_reconciliation(
+        self,
+    ) -> None:
+        registry, hosts, adapter, coordinator = seven_repository_topology()
+        frontier = loop.default_frontier_state(CANARY_REPOSITORIES)
+        signals = [signal_for(repository_id) for repository_id in CANARY_REPOSITORIES]
+        context = loop.default_project_context_state(CANARY_REPOSITORIES)
+        waiting = coordinator_mission(
+            CANARY_REPOSITORIES[1],
+            "SUPERVISOR_ADJUDICATION_REQUESTED",
+            mission_id="waiting-review",
+            lane=LANE,
+        )
+        waiting["review_policy"] = {
+            "gate": "required",
+            "depth": "standard",
+            "stage": "artifact-checkpoint",
+        }
+        loop.apply_supervisor_verdict(
+            waiting,
+            "user_decision",
+            user_packet=review_card("Waiting project"),
+        )
+
+        first_plan = loop.build_coordinator_plan(
+            registry,
+            hosts,
+            adapter,
+            [waiting],
+            coordinator,
+            loop.default_scheduler_state(),
+            authority_signals=signals,
+            frontier_state=frontier,
+            project_context_state=context,
+        )
+        current = next(
+            item
+            for item in first_plan["ready_actions"]
+            if item["kind"] == "reconcile_repository_frontier"
+        )
+        legacy_payload = copy.deepcopy(current["payload"])
+        legacy_payload.pop("route")
+        legacy_action = loop._scheduler_action(
+            "reconcile_repository_frontier",
+            legacy_payload,
+            priority=current["priority"],
+            stable_order=current["stable_order"],
+        )
+        scheduler = loop.default_scheduler_state()
+        scheduler["completed_actions"].append(
+            {
+                "action_id": legacy_action["action_id"],
+                "kind": legacy_action["kind"],
+                "requires_external_result": False,
+                "outcome": "authority_conflict",
+                "evidence": "legacy-observation.json",
+            }
+        )
+
+        plan = loop.build_coordinator_plan(
+            registry,
+            hosts,
+            adapter,
+            [waiting],
+            coordinator,
+            scheduler,
+            authority_signals=signals,
+            frontier_state=frontier,
+            project_context_state=context,
+        )
+        action = plan["next_action"]
+        self.assertEqual(action["kind"], "reconcile_repository_frontier")
+        self.assertNotEqual(action["action_id"], legacy_action["action_id"])
+        self.assertTrue(action["requires_external_result"])
+        self.assertEqual(
+            action["payload"]["route"]["recipient_kind"], "supervisor"
+        )
+        self.assertEqual(
+            action["payload"]["route"]["observer_kind"], "chatgpt_poll"
+        )
+        self.assertIsNotNone(action["payload"]["route"]["recipient_thread_id"])
+        self.assertEqual(plan["execution_state"], "READY")
+        self.assertEqual(
+            plan["next_user_card"]["repository_id"], CANARY_REPOSITORIES[1]
+        )
+
     def test_PC_CANARY_01_existing_four_and_new_three_use_one_contract(self) -> None:
         registry, hosts, adapter, coordinator = seven_repository_topology()
         frontier, signals = frontier_for(CANARY_REPOSITORIES)
@@ -608,7 +699,120 @@ class ProjectContextFrontierTests(unittest.TestCase):
         )
         self.assertEqual(
             reconciliation["payload"]["reconciliation_contract"]["schema"],
-            "project-context-record.v1",
+            "project-context-result.v1",
+        )
+        self.assertEqual(
+            reconciliation["payload"]["reconciliation_contract"]["apply_command"],
+            "coordinator-action-apply-project-context-result",
+        )
+        self.assertTrue(reconciliation["requires_external_result"])
+        self.assertEqual(
+            reconciliation["payload"]["route"]["recipient_kind"],
+            "supervisor",
+        )
+        self.assertEqual(
+            reconciliation["payload"]["route"]["observer_kind"],
+            "chatgpt_poll",
+        )
+
+    def test_PC_RESULT_03_exact_supervisor_result_advances_context_and_route(
+        self,
+    ) -> None:
+        registry, hosts, adapter, coordinator = fixture()
+        repositories = tuple(
+            item["repository_id"] for item in registry["repositories"]
+        )
+        frontier, signals = frontier_for(repositories)
+        context = loop.default_project_context_state(repositories)
+        scheduler = loop.default_scheduler_state()
+        plan = loop.build_coordinator_plan(
+            registry,
+            hosts,
+            adapter,
+            [],
+            coordinator,
+            scheduler,
+            authority_signals=signals,
+            frontier_state=frontier,
+            project_context_state=context,
+        )
+        action = plan["next_action"]
+        self.assertEqual(action["kind"], "reconcile_project_context")
+        owner = plan["primary_writer_task_id"]
+        loop.claim_coordinator_action(
+            scheduler, plan, action["action_id"], owner_task_id=owner
+        )
+        packet_sha256 = loop.sha256_text("project-context-request")
+        route = action["payload"]["route"]
+        loop.prepare_coordinator_action_delivery(
+            scheduler,
+            action["action_id"],
+            route["recipient_thread_id"],
+            packet_sha256,
+            actor_task_id=owner,
+        )
+        loop.mark_coordinator_action_sent(
+            scheduler,
+            action["action_id"],
+            route["recipient_thread_id"],
+            packet_sha256=packet_sha256,
+            after_cursor="context-cursor-1",
+            actor_task_id=owner,
+        )
+        portfolio = loop._refresh_portfolio_after_external_result(
+            portfolio_v2(),
+            scheduler,
+            frontier,
+            [],
+            signals,
+            project_context_state=context,
+        )
+        signal = next(
+            item
+            for item in signals
+            if item["repository_id"] == route["repository_id"]
+        )
+        event = context_event(route["repository_id"], frontier, signal)
+        event["source_message_id"] = "context-result-message-1"
+        result = {
+            "schema_version": 1,
+            "result_id": "context-result-1",
+            "action_id": action["action_id"],
+            "repository_id": route["repository_id"],
+            "lane_id": route["supervision_lane"],
+            "source_actor": "supervisor",
+            "source_thread_id": route["recipient_thread_id"],
+            "source_turn_id": "context-turn-1",
+            "source_message_id": event["source_message_id"],
+            "based_on_project_context_revision": 0,
+            "project_context_event": event,
+        }
+
+        applied = loop.apply_project_context_result_transaction(
+            scheduler,
+            context,
+            frontier,
+            [],
+            portfolio,
+            action["action_id"],
+            result,
+            authority_signals=signals,
+            actor_task_id=owner,
+        )
+
+        self.assertEqual(
+            applied["classification"], "PROJECT_CONTEXT_RESULT_APPLIED"
+        )
+        self.assertEqual(
+            context["repository_status"][route["repository_id"]], "verified"
+        )
+        self.assertEqual(scheduler["route_leases"], [])
+        self.assertEqual(
+            scheduler["completed_actions"][-1]["external_lifecycle_state"],
+            "result_applied",
+        )
+        self.assertEqual(
+            portfolio["repositories"][0]["project_context_status"], "verified"
         )
 
     def test_PC_PORTFOLIO_01_v4_rejects_stale_project_position(self) -> None:

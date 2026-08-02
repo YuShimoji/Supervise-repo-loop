@@ -57,6 +57,14 @@ Gate abstention is machine-readable: an explicit null frontier returns
 `FRONTIER_RECONCILIATION_REQUIRED`, and a late external result returns
 `STALE_RESULT_QUARANTINED` while remaining auditable.
 
+These abstention codes never consume an unresolved reconciliation. The
+Coordinator routes `reconcile_repository_frontier` to the exact active
+Supervisor with `requires_external_result=true`. Only an applied typed result
+that advances or explicitly certifies the frontier can close that semantic
+work. Recording a read-only observation as a completed local action leaves the
+ledger unresolved and must not make the portfolio globally idle or
+`WAITING_USER` while another route remains claimable.
+
 ## Authority high-water signal
 
 `collect_authority_signals` records every registered repository even when no

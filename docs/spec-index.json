@@ -107,6 +107,11 @@
       "status": "active"
     },
     {
+      "id": "project-context-result-v1",
+      "path": "schemas/project-context-result.v1.schema.json",
+      "status": "active"
+    },
+    {
       "id": "supervisor-context-envelope-v1",
       "path": "schemas/supervisor-context-envelope.v1.schema.json",
       "status": "active"

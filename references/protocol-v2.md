@@ -239,6 +239,20 @@ No-action is `IDLE_CHECKPOINT` with no terminal route. It is never Coordinator
   `null`. The card includes project, kind, purpose, why now, entrypoint, every
   requirement, reply format, owner, post-reply behavior, and non-escalation
   boundary. A `WAITING_USER` row without that card is not publishable.
+- The inverse is not valid: a present user card does not make the whole
+  portfolio `WAITING_USER`. Unrelated claimable reconciliation or ordinary
+  work keeps global execution `READY` or `DRAINING` and must continue.
+
+## Reconciliation result contract
+
+`reconcile_repository_frontier` and `reconcile_project_context` are exact
+Supervisor external routes. `AUTHORITY_CONFLICT`,
+`READ_ONLY_RECONCILIATION_OBSERVED`, and other audit abstentions are not
+terminal results when the corresponding ledger remains unchanged. Frontier
+results use `coordinator-action-apply-result`; standalone context results use
+`coordinator-action-apply-project-context-result`. Only the matching primary
+Coordinator applies them, closes that route, recomputes the plan, and drains
+the next claimable action before checkpoint.
 
 ## State separation
 

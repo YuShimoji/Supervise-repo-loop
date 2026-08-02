@@ -4603,10 +4603,11 @@ def _action_observer_kind(action: dict[str, Any]) -> str | None:
         "route_user_response",
         "await_supervisor_verdict",
         "await_supervisor_work_order",
+        "reconcile_repository_frontier",
+        "reconcile_project_context",
         "resolve_mission_value_gate",
         "return_worker_result",
-    "request_next_mission",
-    "probe_authorized_runtime_repair",
+        "request_next_mission",
         "return_authorized_runtime_recovery_result",
     }:
         return "chatgpt_poll"
@@ -5504,6 +5505,37 @@ def _selection_route(
         "attempt_id": selection.get("attempt_id"),
         "supervision_lane": lane,
         "recipient_kind": recipient_kind,
+        "recipient_thread_id": recipient_thread_id,
+        "observer_kind": _route_observer_kind(adapter, recipient_thread_id),
+    }
+
+
+def _supervisor_reconciliation_route(
+    registry: dict[str, Any],
+    adapter: dict[str, Any],
+    repository_id: str,
+    lane: str,
+) -> dict[str, Any]:
+    """Return the exact Supervisor route for a control-plane reconciliation.
+
+    Frontier and project-context reconciliation decide which durable project
+    state is current.  Completing that decision as a local observation can
+    permanently suppress the action while leaving the ledger unchanged.  The
+    exact repository/lane Supervisor therefore owns the semantic result.
+    """
+    supervisor = _supervisor_binding_for(registry, repository_id, lane)
+    recipient_thread_id = (
+        supervisor.get("supervisor_thread_id")
+        if isinstance(supervisor, dict)
+        and supervisor.get("binding_status") == "active"
+        else None
+    )
+    return {
+        "repository_id": repository_id,
+        "mission_id": None,
+        "attempt_id": None,
+        "supervision_lane": lane,
+        "recipient_kind": "supervisor",
         "recipient_thread_id": recipient_thread_id,
         "observer_kind": _route_observer_kind(adapter, recipient_thread_id),
     }
@@ -6687,11 +6719,15 @@ def build_coordinator_plan(
                     }
                 )
                 if decision["classification"] != "FRONTIER_CERTIFIED":
+                    route = _supervisor_reconciliation_route(
+                        registry, adapter, repository_id, lane
+                    )
                     action = _scheduler_action(
                         "reconcile_repository_frontier",
                         {
                             "repository_id": repository_id,
                             "lane_id": lane,
+                            "route": route,
                             "reasons": decision["reasons"],
                             "authority_signal": signal_by_repository.get(
                                 repository_id
@@ -6705,6 +6741,9 @@ def build_coordinator_plan(
                         },
                         priority=5,
                         stable_order=repository_order[repository_id],
+                        requires_external_result=(
+                            route["recipient_thread_id"] is not None
+                        ),
                     )
                     if action["action_id"] not in completed_ids:
                         candidates.append(action)
@@ -6745,6 +6784,9 @@ def build_coordinator_plan(
                 }
             )
             if decision["classification"] != "PROJECT_CONTEXT_CERTIFIED":
+                route = _supervisor_reconciliation_route(
+                    registry, adapter, repository_id, lane
+                )
                 current_lane_frontiers = sorted(
                     (
                         copy.deepcopy(record)
@@ -6759,6 +6801,7 @@ def build_coordinator_plan(
                     {
                         "repository_id": repository_id,
                         "lane_id": lane,
+                        "route": route,
                         "reasons": decision["reasons"],
                         "authority_signal": signal_by_repository.get(
                             repository_id
@@ -6769,8 +6812,14 @@ def build_coordinator_plan(
                             effective_context_safety_mode
                         ),
                         "reconciliation_contract": {
-                            "schema": "project-context-record.v1",
-                            "apply_command": "project-context-apply-event",
+                            "schema": "project-context-result.v1",
+                            "project_context_event_schema": (
+                                "project-context-record.v1"
+                            ),
+                            "apply_command": (
+                                "coordinator-action-apply-project-context-result"
+                            ),
+                            "exact_external_result_required": True,
                             "required_scope": [
                                 "north_star",
                                 "roadmap",
@@ -6790,6 +6839,9 @@ def build_coordinator_plan(
                     },
                     priority=6,
                     stable_order=repository_order[repository_id],
+                    requires_external_result=(
+                        route["recipient_thread_id"] is not None
+                    ),
                 )
                 if action["action_id"] not in completed_ids:
                     candidates.append(action)
@@ -9927,6 +9979,347 @@ def _refresh_portfolio_after_external_result(
         )
     refreshed["semantic_fingerprint"] = portfolio_semantic_fingerprint(refreshed)
     return refreshed
+
+
+def _validate_project_context_external_result(
+    lease: dict[str, Any],
+    result: Any,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise ProtocolError("project context result must be an object")
+    required = (
+        "schema_version",
+        "result_id",
+        "action_id",
+        "repository_id",
+        "lane_id",
+        "source_actor",
+        "source_thread_id",
+        "source_turn_id",
+        "source_message_id",
+        "based_on_project_context_revision",
+        "project_context_event",
+    )
+    missing = [field for field in required if field not in result]
+    if missing:
+        raise ProtocolError(
+            "project context result missing: " + ", ".join(missing)
+        )
+    if result.get("schema_version") != PROJECT_CONTEXT_STATE_VERSION:
+        raise ProtocolError("unsupported project context result schema")
+    for field in (
+        "result_id",
+        "action_id",
+        "repository_id",
+        "lane_id",
+        "source_thread_id",
+        "source_turn_id",
+        "source_message_id",
+    ):
+        if not isinstance(result.get(field), str) or not result[field].strip():
+            raise ProtocolError(f"project context result requires {field}")
+    if result.get("source_actor") != "supervisor":
+        raise ProtocolError(
+            "project context reconciliation result must come from the exact Supervisor"
+        )
+    based_on = result.get("based_on_project_context_revision")
+    if not isinstance(based_on, int) or based_on < 0:
+        raise ProtocolError(
+            "project context result based-on revision must be non-negative"
+        )
+    action = lease.get("action", {})
+    if action.get("kind") != "reconcile_project_context":
+        raise ProtocolError(
+            "project context result requires a reconcile_project_context route"
+        )
+    if action.get("requires_external_result") is not True:
+        raise ProtocolError("project context result requires an external route")
+    route = action.get("payload", {}).get("route", {})
+    expected = {
+        "action_id": lease.get("action_id"),
+        "repository_id": route.get("repository_id"),
+        "lane_id": route.get("supervision_lane"),
+        "source_thread_id": route.get("recipient_thread_id"),
+    }
+    for field, value in expected.items():
+        if result.get(field) != value:
+            raise ProtocolError(f"project context result {field} mismatch")
+    event = result.get("project_context_event")
+    validate_project_context_record(event)
+    for field in ("repository_id", "source_actor", "source_message_id"):
+        if event.get(field) != result.get(field):
+            raise ProtocolError(
+                f"project context event {field} does not match exact result"
+            )
+    if event.get("based_on_project_context_revision") != based_on:
+        raise ProtocolError(
+            "project context event based-on revision does not match result"
+        )
+    return copy.deepcopy(result)
+
+
+def _project_context_result_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    event = result["project_context_event"]
+    return {
+        "result_id": result["result_id"],
+        "source_thread_id": result["source_thread_id"],
+        "source_turn_id": result["source_turn_id"],
+        "source_message_id": result["source_message_id"],
+        "project_context_event_id": event["project_context_event_id"],
+        "project_context_revision": event["project_context_revision"],
+        "authority_fingerprint": event["authority_fingerprint"],
+        "result_sha256": canonical_json_hash(result),
+    }
+
+
+def apply_project_context_result_transaction(
+    scheduler_state: dict[str, Any],
+    project_context_state: dict[str, Any],
+    frontier_state: dict[str, Any],
+    missions: list[dict[str, Any]],
+    portfolio: dict[str, Any],
+    action_id: str,
+    result: dict[str, Any],
+    *,
+    authority_signals: Iterable[dict[str, Any]],
+    actor_task_id: str | None = None,
+) -> dict[str, Any]:
+    """Apply one exact Supervisor context result and close only its route."""
+    scheduler_work = migrate_scheduler_state(scheduler_state)
+    context_work = copy.deepcopy(project_context_state)
+    frontier_work = copy.deepcopy(frontier_state)
+    portfolio_work = copy.deepcopy(portfolio)
+    signals = list(authority_signals)
+    lease_index = _route_lease_index(scheduler_work, action_id)
+    if lease_index is None:
+        existing = next(
+            (
+                item
+                for item in scheduler_work.get("completed_actions", [])
+                if isinstance(item, dict) and item.get("action_id") == action_id
+            ),
+            None,
+        )
+        evidence = (
+            existing.get("evidence") if isinstance(existing, dict) else None
+        )
+        if (
+            isinstance(existing, dict)
+            and existing.get("kind") == "reconcile_project_context"
+            and existing.get("outcome") == "result_applied"
+            and isinstance(evidence, dict)
+            and evidence.get("result_id") == result.get("result_id")
+            and evidence.get("result_sha256") == canonical_json_hash(result)
+        ):
+            return {
+                "classification": "PROJECT_CONTEXT_RESULT_ALREADY_APPLIED",
+                "action_id": action_id,
+                "result_id": result.get("result_id"),
+                "deduplicated": True,
+            }
+        raise ProtocolError("exact project context route lease is required")
+    lease = scheduler_work["route_leases"][lease_index]
+    _bind_or_validate_scheduler_record_owner(lease, actor_task_id)
+    validated = _validate_project_context_external_result(lease, result)
+    result_id = validated["result_id"]
+    for lifecycle_state in ("result_received", "result_parsed"):
+        _set_external_lifecycle(
+            lease,
+            lifecycle_state,
+            details={"result_id": result_id},
+        )
+    signal = next(
+        (
+            item
+            for item in signals
+            if isinstance(item, dict)
+            and item.get("repository_id") == validated["repository_id"]
+        ),
+        None,
+    )
+    event = validated["project_context_event"]
+    validate_project_context_event_against_observations(
+        event, frontier_work, signal
+    )
+    current = context_work.get("contexts", {}).get(validated["repository_id"])
+    current_revision = (
+        int(current.get("project_context_revision", 0))
+        if isinstance(current, dict)
+        else 0
+    )
+    if validated["based_on_project_context_revision"] != current_revision:
+        raise ProtocolError("project context result revision is stale")
+    _set_external_lifecycle(
+        lease,
+        "result_validated",
+        details={"result_id": result_id},
+    )
+    applied = apply_project_context_event(context_work, event)
+    if applied["classification"] not in {
+        "PROJECT_CONTEXT_EVENT_APPLIED",
+        "PROJECT_CONTEXT_EVENT_ALREADY_APPLIED",
+    }:
+        raise ProtocolError(
+            "project context result did not advance the context ledger: "
+            + str(applied["classification"])
+        )
+    evidence = _project_context_result_evidence(validated)
+    _set_external_lifecycle(
+        lease,
+        "result_applied",
+        details={
+            "result_id": result_id,
+            "project_context_event_id": event["project_context_event_id"],
+        },
+    )
+    complete_coordinator_action(
+        scheduler_work,
+        action_id,
+        "result_applied",
+        evidence=evidence,
+        actor_task_id=actor_task_id,
+    )
+    portfolio_work = _refresh_portfolio_after_external_result(
+        portfolio_work,
+        scheduler_work,
+        frontier_work,
+        missions,
+        signals,
+        project_context_state=context_work,
+    )
+    validate_project_context_state(context_work)
+    _validate_scheduler_state_v2(scheduler_work)
+    validate_portfolio_scheduler_consistency(portfolio_work, scheduler_work)
+    validate_portfolio_frontier_consistency(
+        portfolio_work, frontier_work, signals
+    )
+    validate_portfolio_project_context_consistency(
+        portfolio_work, context_work, frontier_work, signals
+    )
+    scheduler_state.clear()
+    scheduler_state.update(scheduler_work)
+    project_context_state.clear()
+    project_context_state.update(context_work)
+    portfolio.clear()
+    portfolio.update(portfolio_work)
+    return {
+        "classification": "PROJECT_CONTEXT_RESULT_APPLIED",
+        "action_id": action_id,
+        "result_id": result_id,
+        "project_context_revision": event["project_context_revision"],
+        "project_context_event_id": event["project_context_event_id"],
+        "deduplicated": False,
+    }
+
+
+def apply_project_context_result_transaction_files(
+    *,
+    scheduler_path: Path | str,
+    project_context_path: Path | str,
+    frontier_path: Path | str,
+    missions_dir: Path | str,
+    portfolio_path: Path | str,
+    journal_dir: Path | str,
+    action_id: str,
+    result: dict[str, Any],
+    authority_signals: Iterable[dict[str, Any]],
+    actor_task_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist the context ledger, route completion, and portfolio atomically."""
+    result_id = str(result.get("result_id") or "")
+    if not result_id:
+        raise ProtocolError("project context transaction requires result_id")
+    transaction_id = canonical_json_hash(
+        {
+            "kind": "project_context_result",
+            "action_id": action_id,
+            "result_id": result_id,
+        }
+    )
+    journal_path = Path(journal_dir) / f"{transaction_id}.json"
+    result_sha256 = canonical_json_hash(result)
+
+    def persist_desired(journal: dict[str, Any]) -> int:
+        desired = journal.get("desired_state")
+        if not isinstance(desired, dict):
+            raise ProtocolError(
+                "project context transaction journal lacks desired state"
+            )
+        writes = (
+            (Path(project_context_path), desired["project_context"]),
+            (Path(scheduler_path), desired["scheduler"]),
+            (Path(portfolio_path), desired["portfolio"]),
+        )
+        for target, value in writes:
+            atomic_write_json(target, value)
+        return len(writes)
+
+    if journal_path.is_file():
+        journal = load_json(journal_path)
+        if journal.get("result_sha256") != result_sha256:
+            raise ProtocolError("project context transaction result replay mismatch")
+        writes = persist_desired(journal)
+        journal["state"] = "applied"
+        journal["replayed_at"] = utc_now()
+        atomic_write_json(journal_path, journal)
+        return {
+            "classification": "PROJECT_CONTEXT_RESULT_TRANSACTION_REPLAYED",
+            "transaction_id": transaction_id,
+            "result_id": result_id,
+            "write_count": writes,
+            "deduplicated": True,
+        }
+
+    scheduler = load_scheduler_state(scheduler_path)
+    missions = load_missions(missions_dir)
+    frontier = load_frontier_state(
+        frontier_path,
+        (str(item.get("repository_id") or "") for item in missions),
+    )
+    context = load_project_context_state(
+        project_context_path,
+        {
+            str(item.get("repository_id") or "") for item in missions
+        }
+        | {str(result.get("repository_id") or "")},
+    )
+    portfolio = load_json(portfolio_path)
+    outcome = apply_project_context_result_transaction(
+        scheduler,
+        context,
+        frontier,
+        missions,
+        portfolio,
+        action_id,
+        result,
+        authority_signals=authority_signals,
+        actor_task_id=actor_task_id,
+    )
+    journal = {
+        "schema_version": 1,
+        "transaction_id": transaction_id,
+        "state": "prepared",
+        "action_id": action_id,
+        "result_id": result_id,
+        "result_sha256": result_sha256,
+        "prepared_at": utc_now(),
+        "desired_state": {
+            "project_context": context,
+            "scheduler": scheduler,
+            "portfolio": portfolio,
+        },
+    }
+    atomic_write_json(journal_path, journal)
+    writes = persist_desired(journal)
+    journal["state"] = "applied"
+    journal["applied_at"] = utc_now()
+    atomic_write_json(journal_path, journal)
+    return {
+        **outcome,
+        "classification": "PROJECT_CONTEXT_RESULT_TRANSACTION_APPLIED",
+        "transaction_id": transaction_id,
+        "write_count": writes,
+    }
 
 
 def apply_external_result_transaction(
@@ -13381,6 +13774,13 @@ def _live_mutation_targets(args: argparse.Namespace) -> list[Path]:
             "portfolio",
             "journal_dir",
         ),
+        "coordinator-action-apply-project-context-result": (
+            "coordinator_state",
+            "scheduler_state",
+            "project_context_state",
+            "portfolio",
+            "journal_dir",
+        ),
         "project-context-apply-event": ("project_context_state",),
         "coordinator-action-complete": ("scheduler_state", "coordinator_state"),
         "coordinator-action-release": ("scheduler_state",),
@@ -13484,6 +13884,18 @@ def _require_canonical_live_mutation_paths(args: argparse.Namespace) -> None:
         },
         "coordinator-action-apply-result": {
             "coordinator_state": DEFAULT_COORDINATOR_STATE,
+            "scheduler_state": DEFAULT_SCHEDULER_STATE,
+            "frontier_state": DEFAULT_FRONTIER_STATE,
+            "project_context_state": DEFAULT_PROJECT_CONTEXT_STATE,
+            "missions_dir": DEFAULT_MISSIONS,
+            "portfolio": DEFAULT_PORTFOLIO_JSON,
+            "journal_dir": DEFAULT_FRONTIER_JOURNAL,
+        },
+        "coordinator-action-apply-project-context-result": {
+            "coordinator_state": DEFAULT_COORDINATOR_STATE,
+            "registry": DEFAULT_BINDINGS,
+            "hosts": DEFAULT_HOSTS,
+            "adapter": DEFAULT_ADAPTER,
             "scheduler_state": DEFAULT_SCHEDULER_STATE,
             "frontier_state": DEFAULT_FRONTIER_STATE,
             "project_context_state": DEFAULT_PROJECT_CONTEXT_STATE,
@@ -14092,6 +14504,49 @@ def build_parser() -> argparse.ArgumentParser:
         "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
     )
     coordinator_apply_result.add_argument("--dry-run", action="store_true")
+
+    coordinator_apply_context_result = sub.add_parser(
+        "coordinator-action-apply-project-context-result"
+    )
+    coordinator_apply_context_result.add_argument("--action-id", required=True)
+    coordinator_apply_context_result.add_argument(
+        "--result", required=True, type=Path
+    )
+    coordinator_apply_context_result.add_argument(
+        "--registry", type=Path, default=DEFAULT_BINDINGS
+    )
+    coordinator_apply_context_result.add_argument(
+        "--hosts", type=Path, default=DEFAULT_HOSTS
+    )
+    coordinator_apply_context_result.add_argument(
+        "--adapter", type=Path, default=DEFAULT_ADAPTER
+    )
+    coordinator_apply_context_result.add_argument(
+        "--scheduler-state", type=Path, default=DEFAULT_SCHEDULER_STATE
+    )
+    coordinator_apply_context_result.add_argument(
+        "--frontier-state", type=Path, default=DEFAULT_FRONTIER_STATE
+    )
+    coordinator_apply_context_result.add_argument(
+        "--project-context-state",
+        type=Path,
+        default=DEFAULT_PROJECT_CONTEXT_STATE,
+    )
+    coordinator_apply_context_result.add_argument(
+        "--missions-dir", type=Path, default=DEFAULT_MISSIONS
+    )
+    coordinator_apply_context_result.add_argument(
+        "--portfolio", type=Path, default=DEFAULT_PORTFOLIO_JSON
+    )
+    coordinator_apply_context_result.add_argument(
+        "--journal-dir", type=Path, default=DEFAULT_FRONTIER_JOURNAL
+    )
+    coordinator_apply_context_result.add_argument(
+        "--coordinator-state", type=Path, default=DEFAULT_COORDINATOR_STATE
+    )
+    coordinator_apply_context_result.add_argument(
+        "--dry-run", action="store_true"
+    )
 
     coordinator_complete = sub.add_parser("coordinator-action-complete")
     coordinator_complete.add_argument("--action-id", required=True)
@@ -15055,6 +15510,62 @@ def main(argv: list[str] | None = None) -> int:
                     result=result_payload,
                     observed_authority_signal=observed_authority_signal,
                     coordinator_path=args.coordinator_state,
+                    actor_task_id=actor_task_id,
+                )
+            result["dry_run"] = bool(args.dry_run)
+            _json_stdout(result)
+            return 0
+
+        if args.command == "coordinator-action-apply-project-context-result":
+            coordinator_state, actor_task_id = _authorized_cli_writer(args)
+            result_payload = load_json(args.result)
+            registry = load_json(args.registry)
+            hosts = load_json(args.hosts)
+            adapter = load_json(args.adapter)
+            validate_registry(registry, hosts)
+            signals = collect_authority_signals(registry, hosts, adapter)
+            if args.dry_run:
+                scheduler_state = load_scheduler_state(args.scheduler_state)
+                missions = load_missions(args.missions_dir)
+                frontier_state = load_frontier_state(
+                    args.frontier_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                    ),
+                )
+                project_context_state = load_project_context_state(
+                    args.project_context_state,
+                    (
+                        str(item.get("repository_id") or "")
+                        for item in registry.get("repositories", [])
+                        if isinstance(item, dict)
+                    ),
+                )
+                portfolio = load_json(args.portfolio)
+                result = apply_project_context_result_transaction(
+                    scheduler_state,
+                    project_context_state,
+                    frontier_state,
+                    missions,
+                    portfolio,
+                    args.action_id,
+                    result_payload,
+                    authority_signals=signals,
+                    actor_task_id=actor_task_id,
+                )
+            else:
+                result = apply_project_context_result_transaction_files(
+                    scheduler_path=args.scheduler_state,
+                    project_context_path=args.project_context_state,
+                    frontier_path=args.frontier_state,
+                    missions_dir=args.missions_dir,
+                    portfolio_path=args.portfolio,
+                    journal_dir=args.journal_dir,
+                    action_id=args.action_id,
+                    result=result_payload,
+                    authority_signals=signals,
                     actor_task_id=actor_task_id,
                 )
             result["dry_run"] = bool(args.dry_run)

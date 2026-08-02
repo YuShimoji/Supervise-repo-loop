@@ -57,6 +57,13 @@ view is absent or stale. Ordinary actions are admitted only after both gates
 pass. Their action identity includes the complete `SupervisorContextEnvelope`,
 so the envelope must accompany the exact send to the Supervisor or Worker.
 
+Both reconciliation actions are exact external Supervisor routes. A local
+audit, `AUTHORITY_CONFLICT`, `READ_ONLY_RECONCILIATION_OBSERVED`, or other
+abstention that does not advance the relevant ledger is evidence, not semantic
+completion. A completed legacy local action ID cannot suppress the routed
+action because the action identity includes the exact recipient and external
+result contract.
+
 An external result for a context-bound action must echo
 `supervisor_context_envelope_id` and
 `based_on_project_context_revision`. Application performs two current-state
@@ -81,6 +88,18 @@ The primary Coordinator applies a prepared context event only through:
 ```powershell
 python scripts/supervise_repo_loop.py project-context-apply-event --event <event.json>
 ```
+
+For a context reconciliation dispatched by the scheduler, the exact Supervisor
+returns `project-context-result.v1` and the primary applies it through:
+
+```powershell
+python scripts/supervise_repo_loop.py coordinator-action-apply-project-context-result --action-id <action-id> --result <result.json>
+```
+
+That transaction advances the context ledger, closes only the matching route,
+and refreshes the portfolio. The Coordinator must immediately recompute the
+plan; a still-claimable frontier, context, or ordinary action forbids a
+checkpoint even when a separate user card is visible.
 
 The command independently verifies authority and every active lane frontier.
 Only the exact bound primary Coordinator and canonical installed state path may

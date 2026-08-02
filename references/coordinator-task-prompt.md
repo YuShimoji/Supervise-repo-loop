@@ -243,6 +243,10 @@ Capability gate
 - Never send ordinary work or adjudication without the exact action-bound
   `SupervisorContextEnvelope`. Missing or stale project context admits only
   frontier, authority, and project-context reconciliation.
+- Treat `reconcile_repository_frontier` and `reconcile_project_context` as
+  exact external Supervisor routes. A local audit or abstention that leaves
+  its ledger unchanged is not completion, and a legacy completed local action
+  must not suppress the routed successor identity.
 - Before any live mutation, require the process `CODEX_THREAD_ID` to equal the
   active exact `coordinator_state.coordinator_task.task_id`. Do not copy or
   pass the primary ID on behalf of another task. A repair, audit, reporting, or
@@ -345,6 +349,10 @@ Waiting and turn budget
   recompute the plan. Do not call `coordinator-action-complete` from a delivery
   ACK, token, cursor, or non-empty evidence string.
   A Supervisor result found by the initial poll is consumed before waiting.
+- Apply a standalone project-context reconciliation packet with
+  `coordinator-action-apply-project-context-result`. Immediately recompute the
+  plan after either result reducer; an unchanged reconciliation ledger remains
+  claimable work rather than a checkpoint.
 - Do not repeatedly wait on one exact task while unrelated capacity or READY
   work exists. Do not treat commentary, an active flag, or an unchanged
   snapshot as a result event.
@@ -377,6 +385,10 @@ Waiting and turn budget
 - If READY remains because of a real turn or safety ceiling, persist an owned
   continuation containing action ID, repository, owner, deadline, and wake
   event. Ownerless READY is invalid.
+- A visible `next_user_card` parks only its exact Mission. When another
+  repository has a claimable reconciliation or work action, report `READY` or
+  `DRAINING` and continue filling capacity; do not collapse the portfolio to
+  global `WAITING_USER` or use `SAFETY_CEILING` for that claimable work.
 
 Durable portfolio index
 - Derive the canonical JSON and human-readable Markdown status files named in

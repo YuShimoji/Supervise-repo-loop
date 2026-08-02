@@ -273,3 +273,22 @@
   top-level card for every presented `WAITING_USER` row.
 - Effect: the renderer can publish the deterministic plan without allowing
   ordinary work from an uncertified context or hiding an actionable user card.
+
+## D-024 — Unresolved reconciliation is a routed result, not completion
+
+- Date: 2026-08-02
+- Corrects: completing read-only or authority-conflict reconciliation
+  observations as local scheduler actions, which permanently suppressed the
+  same action IDs while frontier and project-context ledgers stayed at their
+  unresolved revisions. A separate visible user card then made the portfolio
+  appear globally `WAITING_USER` with zero active routes.
+- Decision: emit frontier and project-context reconciliation as exact external
+  Supervisor routes; bind action identity to that recipient and typed result;
+  apply standalone context results through a replay-safe reducer; and treat any
+  abstention that leaves its ledger unchanged as non-completion. Preserve the
+  user card for its Mission while unrelated claimable work remains `READY` or
+  `DRAINING`.
+- Effect: legacy locally completed reconciliation IDs cannot stop the corrected
+  routes. The Coordinator can fill independent capacity, consume exact
+  Supervisor results, advance the ledgers, and proceed to ordinary work without
+  waiting for an unrelated user response.

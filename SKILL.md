@@ -289,18 +289,29 @@ paused recovery lease:
    seconds on only the exact Codex Worker targets and cursors; never pass a
    ChatGPT chat ID to `wait_threads`;
 7. consume the first semantic result with
-   `coordinator-action-apply-result`; delivery ACK alone is never completion.
-   The idempotent reducer validates exact identity and authority observation,
-   applies project-context/frontier CAS, Mission, scheduler, and portfolio v4 together, closes
-   only that route, and then recomputes the plan; drain the mandatory protocol
-   handoff to its next external wait or terminal before checkpoint;
+   `coordinator-action-apply-result`; a standalone project-context
+   reconciliation result uses
+   `coordinator-action-apply-project-context-result`. Delivery ACK alone is
+   never completion. The idempotent reducer validates exact identity and
+   authority observation, applies the relevant project-context/frontier CAS,
+   Mission, scheduler, and portfolio v4 transition, closes only that route,
+   and then recomputes the plan; drain the mandatory protocol handoff to its
+   next external wait or terminal before checkpoint;
 8. on an unchanged timeout, persist the wait set and checkpoint without another
    progress message; arm recovery only after the foreground wait ends;
 9. recovery reads only that wait set, and pauses when no route lease remains.
 
-Do not run a periodic idle model wake. Completed action IDs
-suppress unchanged cards, blockers, authority revisions, and successor
-requests. A `BLOCKED` frontier never authorizes a generic successor; a changed
+Do not run a periodic idle model wake. Completed action IDs suppress unchanged
+cards, blockers, authority revisions, and successor requests only after their
+semantic transition has been applied. An `AUTHORITY_CONFLICT`,
+`READ_ONLY_RECONCILIATION_OBSERVED`, or other reconciliation abstention that
+leaves the frontier or project-context revision unchanged is not completion.
+Route `reconcile_repository_frontier` and `reconcile_project_context` to the
+exact active Supervisor and wait for the typed result; a legacy local
+completion must not suppress that routed action. A visible `next_user_card`
+parks only its Mission: if an unrelated reconciliation or work action is
+claimable, execution is `READY` or `DRAINING`, not globally `WAITING_USER`.
+A `BLOCKED` frontier never authorizes a generic successor; a changed
 recovery signal creates one bounded recovery action. A `COMPLETE` lane frontier
 permits one Supervisor successor request when repository policy allows it.
 An ADOPTED exact runtime-repair disposition creates a typed, evidence-bound

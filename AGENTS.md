@@ -1,14 +1,11 @@
-# Repository guidance
+# Compatibility bootstrap repository rules
 
-Read `docs/project-context.md` and `docs/development.md` before changing this
-repository, then read the authority or specification they name for the slice.
+This repository is a stable compatibility entry for the simplified Frontier loop. The portable source of truth is `YuShimoji/project-reflection-coordinator`; the UI dependency is `YuShimoji/FrontierBoard`.
 
-This Git repository is the canonical static source. The installed skill is the
-runtime copy and owns the only live `state/`. Never copy, initialize, delete,
-or version live `state/`, and never synchronize `.serena/`. Use the repository
-scripts for tests and source-to-install synchronization.
-
-If a referenced file is missing, treat the reference as stale rather than as a
-blocker. Preserve unrelated changes and report residual work with purpose,
-effect, requirements, state, owner, and next move.
+- Do not reintroduce the retired global Coordinator / Web Supervisor / persistent Worker scheduler.
+- Do not store host IDs, task IDs, credentials, cursors, local state, absolute profile paths, generated media, or installed runtime state.
+- `scripts/bootstrap-frontier-loop.ps1` may only clone or fast-forward the canonical Coordinator checkout and then delegate to its checked-in setup script.
+- Never reset, clean, stash, rebase, force-push, or overwrite a dirty checkout.
+- Keep `config/canonical-source.json` anchored to a tested minimum Coordinator revision. Later descendants of that revision are allowed so future accepted updates can flow to another host.
+- Run `pwsh -NoProfile -File tests/Test-BootstrapContract.ps1` before publishing.
 

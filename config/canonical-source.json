@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "coordinator": {
+    "repositoryUrl": "https://github.com/YuShimoji/project-reflection-coordinator.git",
+    "branch": "main",
+    "minimumRevision": "886deb2b3593070f9e6d0918c373af41004e181f"
+  },
+  "validatedContract": {
+    "coreVersion": "10.2-frontier.1",
+    "coreSha256": "BB6CC6421676E4DFB61C67197ECA7C760C45F666E9143CE6BA7AADA579DA5E28",
+    "frontierBoardRepositoryUrl": "https://github.com/YuShimoji/FrontierBoard.git",
+    "frontierBoardRevision": "29ac4aa1e478ac028716b08ea5526ae18cf381ad",
+    "frontierBoardApplicationVersion": "0.4.1",
+    "frontierBoardTestCount": 54
+  }
+}

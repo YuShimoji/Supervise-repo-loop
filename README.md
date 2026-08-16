@@ -1,34 +1,36 @@
-# supervise-repo-loop
+# Supervise Repo Loop compatibility entry
 
-This repository is the version-controlled source for the static
-`supervise-repo-loop` skill. Codex loads the installed runtime copy from
-`C:\Users\thank\.codex\skills\supervise-repo-loop`; that installed directory
-also owns the live Coordinator state.
+The old v2 scheduler topology was retired on 2026-08-17. This repository no longer owns a live scheduler, portfolio queue, route lease, Supervisor binding, or persistent Worker state.
 
-The two surfaces have deliberately different responsibilities:
+The current development path is deliberately small:
 
-- this repository: skill instructions, protocol and design documents, schemas,
-  deterministic code, and tests;
-- installed skill: a verified copy of those static files plus the only live
-  `state/` used by the Coordinator.
-
-Do not copy live state into this repository or replace the installed skill with
-a directory junction. See [development.md](docs/development.md) for the test,
-verification, and non-destructive installation workflow.
-
-## Quick verification
-
-```powershell
-.\scripts\test.ps1
+```text
+User
+  -> Coordinator (one decision)
+  -> Worker (one bounded probe)
+  -> Coordinator (records evidence and chooses the next probe)
+  -> FrontierBoard (durable user-visible frontier)
 ```
 
-## Preview or install static changes
+| Surface | Canonical source | Purpose |
+| --- | --- | --- |
+| Core and setup | `YuShimoji/project-reflection-coordinator` | Versioned Core, host profile, dependency lock, installation and runtime sync |
+| Durable Board | `YuShimoji/FrontierBoard` | Cards, choices, evidence, project frontier and local app data |
+| This repository | `YuShimoji/Supervise-repo-loop` | Backward-compatible discovery and clean-host bootstrap only |
+
+## Planner007 setup
+
+From a clean checkout of this repository:
 
 ```powershell
-.\scripts\sync-installed-skill.ps1 -WhatIf
-.\scripts\sync-installed-skill.ps1
+pwsh -NoProfile -File .\scripts\bootstrap-frontier-loop.ps1 `
+  -StorageRoot 'C:\Users\thank\Storage' `
+  -Role standby
 ```
 
-The installer never deletes target files and never reads from or writes to the
-installed `state/` or `.serena/` trees.
+The bootstrap performs a normal `git fetch --prune` and `pull --ff-only`, verifies that the canonical minimum revision is in history, and invokes the Coordinator repository's own `setup-remote-coordinator.ps1`. That setup locks, tests, builds, canary-checks, and installs FrontierBoard before it installs the Core and thin skills. Dirty, ahead, divergent, or incorrectly bound checkouts are preserved and held.
+
+No content project is resumed by setup. The six music/video projects restart only after an explicit fresh ranking operation.
+
+The retired implementation remains recoverable from Git commit `c82b88f80c8e595d2ff6303c65bf54aadab15035`; it is history, not runtime authority.
 

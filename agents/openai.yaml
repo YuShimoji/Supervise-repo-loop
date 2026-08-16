@@ -1,7 +1,7 @@
 interface:
-  display_name: "リポジトリ監修ループ v2"
-  short_description: "One Coordinator for routed repository supervision"
-  default_prompt: "Use $supervise-repo-loop for this repository until terminal state."
+  display_name: "シンプル・コアループ互換入口"
+  short_description: "Bootstrap the canonical Coordinator plus FrontierBoard loop"
+  default_prompt: "Use $supervise-repo-loop to bootstrap or enter the simplified development loop."
 
 policy:
   allow_implicit_invocation: false

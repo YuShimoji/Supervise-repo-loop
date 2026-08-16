@@ -1,105 +1,18 @@
 # Project context
 
-## Thesis
+## Current direction
 
-`supervise-repo-loop` lets one user-facing Coordinator safely operate many
-repository-specific Supervisor and Worker loops without exposing internal
-bindings or allowing one project's human gate to stall unrelated work.
+The repository is a backward-compatible public doorway. It bootstraps the canonical simplified loop from `project-reflection-coordinator` and does not own runtime scheduling.
 
-## Current development axis
+## Current verified floor
 
-Replace the global single-route claim with a portfolio scheduler that separates
-a short-lived scheduling claim from independent repository route leases, while
-retaining deterministic delivery, project-isolated review, durable status, and
-traceable user input.
+- Coordinator minimum revision: `886deb2b3593070f9e6d0918c373af41004e181f`
+- Core: `10.2-frontier.1`
+- Core SHA-256: `BB6CC6421676E4DFB61C67197ECA7C760C45F666E9143CE6BA7AADA579DA5E28`
+- FrontierBoard: `main@29ac4aa1e478ac028716b08ea5526ae18cf381ad`, app `0.4.1`, 54 tests
 
-## Current slice
+Descendants of the Coordinator floor are intentionally allowed. This lets Planner007 receive future accepted Core and Board lock changes through normal runtime sync without publishing a new compatibility commit for every update.
 
-The static source has been moved into a dedicated development repository while
-the installed runtime retains the only live `state/`. The Coordinator Prompt
-now defines bounded cross-project route capacity, one multi-target wait, a
-durable all-project index, canonical Mission/project states, and user-input
-lineage. Scheduler schema v2 and its v1 migration are the active implementation
-slice. Existing delivery tokens and live state must remain intact during
-deployment.
+## Safety boundary
 
-The active corrective sub-slice closes a live status checkpoint defect: a
-completed Worker Report was observed during a status request but remained
-unsent until the next recovery wake. Protocol completion now drains separately
-from the per-project new-work budget. The same sub-slice adds deterministic
-seven-stage graphical status and evidence-bound v2 stop contracts.
-
-A later live audit exposed two additional must-fix gaps. First, an ADOPTED
-NLMYTGen runtime-repair disposition had no claimable scheduler representation,
-so the project remained blocked after all required authority was present.
-Second, ChatGPT Supervisor chats were incorrectly projected into the same
-`wait_threads` set as Codex Workers, although that observer supports Codex
-tasks only; an already-completed FastFictionFactory disposition therefore
-remained leased. The current sub-slice adds typed one-shot runtime effects and
-transport-aware `poll_targets`/`wait_targets`.
-
-## Final deliverable image
-
-The Coordinator always shows one actionable user card, continues safe READY
-work while unrelated routes wait, accepts natural-language replies, and resumes
-only the exact Mission through its bound Supervisor. One durable portfolio
-index exposes every project, proposal, blocker, decision, and next move. Local
-orchestration never implies editorial acceptance or an external-effect
-authority.
-
-## Remaining acceptance gate
-
-Scheduler v2 migration, behavioral tests, and non-destructive static-source
-installation are complete. Do not claim the whole operational redesign live-
-accepted until a two-project canary proves that B can be dispatched and
-completed while A remains delayed. The canonical portfolio index, full
-Supervisor disposition history, and interrupted multi-route recovery also
-require behavior-level verification, not Prompt phrase checks.
-
-## Acceptance state
-
-- Previously verified baseline: deterministic single-claim plan, prepared
-  delivery outbox, semantic action deduplication, event inbox, successor
-  identity, changed-only BLOCKED recovery, and 72 regression tests.
-- Implemented and installed: scheduler-claim/route-lease separation, three-
-  route capacity, one execution route per repository, v1 state migration,
-  portfolio Prompt and recovery-lease contracts, bounded-wait checkpoint
-  gating, durable equal-priority round-robin admission, status-triggered
-  result consumption, required handoff-chain projection, duplicate exact-route
-  suppression, cursor-complete checkpoint gating, deterministic graphical
-  portfolio rendering, and complete blocker-contract enforcement/reconstruction.
-  The current source adds compare-and-swap blocker-contract revision with
-  exact Supervisor-evidence binding, Mission-file locking, durable bidirectional
-  history, conflict rejection, and file-level replay idempotency so later
-  evidence cannot diverge from scheduler state. All 128 regression tests pass
-  in both source and installed copies after the 2026-08-01 static
-  synchronization.
-- Live migration verified: the two legacy BLOCKED records now carry
-  evidence-bound v2 contracts, and the canonical schema-v2 portfolio index was
-  regenerated by the installed renderer without starting new work, probing
-  either blocker, or rearming recovery. The later NLMYTGen blocker revision is
-  additionally bound to its exact Supervisor event and evidence hash; replay is
-  confirmed as a no-op.
-- Live route-isolation evidence: three exact routes coexisted at scheduler
-  revision 118. The Residual Atlas Supervisor successor result was consumed and
-  replaced by a new exact Worker route at revision 122 while the NLMYTGen and
-  FastFictionFactory action/token/cursor identities remained unchanged. The
-  canonical JSON and generated Markdown were rebuilt from that same revision;
-  the installed consistency gate accepted all three structured route records.
-  The immutable point-in-time identities are recorded in
-  [live-route-isolation-rev118-to-rev122.md](evidence/live-route-isolation-rev118-to-rev122.md).
-- Live status-boundary handoff evidence: both the FastFictionFactory and
-  Residual Atlas Worker Reports were consumed and sent to their distinct
-  Supervisors before the revision-135 checkpoint. The plan kept both exact
-  delivery identities and classified the regular ChatGPT recipients as
-  `chatgpt_poll`; neither was passed to the Codex-only wait API. Both verdicts
-  arrived independently. See
-  [runtime-recovery-and-route-observer-gap-20260801.md](evidence/runtime-recovery-and-route-observer-gap-20260801.md).
-- Intentionally inactive while idle: recovery automation.
-- Still required before claiming complete live acceptance: execution and
-  exact receipt adjudication of the newly typed NLMYTGen runtime recovery, plus
-  one deliberately interrupted typed-recovery canary. The independent project
-  completion, status-request handoff, route-admission, replacement, and durable
-  portfolio/input-projection portions are now proven.
-- Optional later hardening: an external distributed transaction journal if
-  writers on multiple hosts or non-lock-preserving storage are ever authorized.
+Bootstrap creates host-local profile, Board data, installed app, receipt, Core, and thin-skill copies only after canonical verification. It does not copy task IDs or old portfolio state, and it does not start music/video production.
